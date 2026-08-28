@@ -20,7 +20,11 @@ const TX1 = '0x' + '11'.repeat(32)
 const EH1 = '0x' + '22'.repeat(32)
 const ZERO32 = '0x' + '00'.repeat(32)
 
-const V = { None: 0, PaymentVerified: 1, TxNotFound: 2, TxFailed: 3, NoValueMoved: 4, EvidenceUnreachable: 5 }
+const V = {
+  None: 0, PaymentVerified: 1, EvidenceIntact: 2, EvidenceUnbound: 3, EvidenceUnhashed: 4,
+  PaymentTxNotFound: 5, PaymentTxFailed: 6, PaymentNoValue: 7,
+  EvidenceUnreachable: 8, EvidenceAbsent: 9,
+}
 
 async function fresh() {
   const chain = await newChain()
@@ -67,7 +71,7 @@ await check('only the owner rotates the attester, and never to the zero address'
   r = await chain.call(OWNER, addr, 'setAttester', [STRANGER])
   assert.equal(r.reverted, false)
   // Old attester is locked out immediately; new one works.
-  const args = [1n, REVIEWER, 0n, V.TxNotFound, ZERO32, EH1]
+  const args = [1n, REVIEWER, 0n, V.PaymentTxNotFound, ZERO32, EH1]
   assert.equal((await chain.call(ATTESTER, addr, 'attest', args)).selector, ERRORS.NotAttester)
   assert.equal((await chain.call(STRANGER, addr, 'attest', args)).reverted, false)
 })
@@ -109,7 +113,7 @@ await check('an unattested record reads as None and is not payment-backed', asyn
 
 await check('re-attestation overwrites the verdict and bumps the revision', async () => {
   const { chain, addr } = await fresh()
-  await chain.call(ATTESTER, addr, 'attest', [1n, REVIEWER, 0n, V.TxNotFound, ZERO32, EH1])
+  await chain.call(ATTESTER, addr, 'attest', [1n, REVIEWER, 0n, V.PaymentTxNotFound, ZERO32, EH1])
   // The claimed tx later appears on chain: verdict flips.
   await chain.call(ATTESTER, addr, 'attest', [1n, REVIEWER, 0n, V.PaymentVerified, TX1, EH1])
   const a = (await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result
@@ -120,7 +124,8 @@ await check('re-attestation overwrites the verdict and bumps the revision', asyn
 
 await check('isPaymentBacked is true only for PaymentVerified', async () => {
   const { chain, addr } = await fresh()
-  for (const v of [V.TxNotFound, V.TxFailed, V.NoValueMoved, V.EvidenceUnreachable]) {
+  for (const v of [V.EvidenceIntact, V.EvidenceUnhashed, V.PaymentTxNotFound, V.PaymentTxFailed,
+                   V.PaymentNoValue, V.EvidenceUnreachable, V.EvidenceAbsent]) {
     await chain.call(ATTESTER, addr, 'attest', [10n, REVIEWER, BigInt(v), v, ZERO32, EH1])
     const backed = (await chain.call(STRANGER, addr, 'isPaymentBacked', [10n, REVIEWER, BigInt(v)])).result
     assert.equal(backed, false, `verdict ${v} must not count as backed`)
@@ -139,13 +144,13 @@ console.log('\nevents')
 
 await check('FeedbackAttested carries the tuple, verdict and revision', async () => {
   const { chain, addr } = await fresh()
-  const r = await chain.call(ATTESTER, addr, 'attest', [5n, REVIEWER, 2n, V.NoValueMoved, TX1, EH1])
+  const r = await chain.call(ATTESTER, addr, 'attest', [5n, REVIEWER, 2n, V.PaymentNoValue, TX1, EH1])
   const ev = r.logs.find((l) => l.eventName === 'FeedbackAttested')
   assert.ok(ev, 'event emitted')
   assert.equal(ev.args.agentId, 5n)
   assert.equal(ev.args.clientAddress.toLowerCase(), REVIEWER)
   assert.equal(ev.args.feedbackIndex, 2n)
-  assert.equal(ev.args.verdict, V.NoValueMoved)
+  assert.equal(ev.args.verdict, V.PaymentNoValue)
   assert.equal(ev.args.paymentTx, TX1)
   assert.equal(ev.args.revision, 1)
 })
@@ -156,8 +161,8 @@ await check('attestBatch writes every row and enforces the attester gate', async
   const { chain, addr } = await fresh()
   const rows = [
     [1n, V.PaymentVerified, TX1],
-    [2n, V.TxNotFound, ZERO32],
-    [3n, V.EvidenceUnreachable, ZERO32],
+    [2n, V.PaymentTxNotFound, ZERO32],
+    [3n, V.EvidenceAbsent, ZERO32],
   ]
   const args = [
     rows.map((r) => r[0]),
@@ -178,7 +183,7 @@ await check('attestBatch writes every row and enforces the attester gate', async
 await check('attestBatch rejects mismatched array lengths', async () => {
   const { chain, addr } = await fresh()
   const r = await chain.call(ATTESTER, addr, 'attestBatch', [
-    [1n, 2n], [REVIEWER], [0n, 0n], [V.TxNotFound, V.TxNotFound], [ZERO32, ZERO32], [EH1, EH1],
+    [1n, 2n], [REVIEWER], [0n, 0n], [V.EvidenceIntact, V.EvidenceIntact], [ZERO32, ZERO32], [EH1, EH1],
   ])
   assert.equal(r.selector, ERRORS.LengthMismatch)
 })
@@ -190,7 +195,7 @@ await check('a batch of 100 rows fits comfortably in a block', async () => {
     Array.from({ length: n }, (_, i) => BigInt(i)),
     Array(n).fill(REVIEWER),
     Array(n).fill(0n),
-    Array(n).fill(V.TxNotFound),
+    Array(n).fill(V.EvidenceIntact),
     Array(n).fill(ZERO32),
     Array(n).fill(EH1),
   ]
@@ -198,6 +203,69 @@ await check('a batch of 100 rows fits comfortably in a block', async () => {
   assert.equal(r.reverted, false)
   assert.ok(r.gasUsed < 8_000_000n, `gas ${r.gasUsed} should stay well under limits`)
   console.log(`      (100 attestations: ${r.gasUsed} gas — ~${(Number(r.gasUsed) / n).toFixed(0)}/row)`)
+})
+
+
+
+console.log('\nevidence ladder (v2)')
+
+await check('the whole ladder is writable — every rung has a distinct verdict', async () => {
+  const { chain, addr } = await fresh()
+  const ladder = [
+    V.PaymentVerified, V.EvidenceIntact, V.EvidenceUnbound, V.EvidenceUnhashed,
+    V.PaymentTxNotFound, V.PaymentTxFailed, V.PaymentNoValue,
+    V.EvidenceUnreachable, V.EvidenceAbsent,
+  ]
+  for (const [i, v] of ladder.entries()) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [BigInt(i), REVIEWER, 0n, v, ZERO32, EH1])
+    assert.equal(r.reverted, false, `verdict ${v} must be writable`)
+    const a = (await chain.call(STRANGER, addr, 'getAttestation', [BigInt(i), REVIEWER, 0n])).result
+    assert.equal(a.verdict, v)
+  }
+})
+
+await check('a verdict beyond the enum is rejected, not silently coerced', async () => {
+  // The reason v1 could not be widened in place: Solidity reverts on decoding
+  // an out-of-range enum, so the deployed value set is a hard boundary.
+  const { chain, addr } = await fresh()
+  const r = await chain.call(ATTESTER, addr, 'attest', [1n, REVIEWER, 0n, 10, ZERO32, EH1])
+  assert.equal(r.reverted, true)
+})
+
+await check('hasIntactEvidence accepts the two rungs where evidence held, and nothing else', async () => {
+  const { chain, addr } = await fresh()
+  const accepted = [V.PaymentVerified, V.EvidenceIntact]
+  const rejected = [V.EvidenceUnbound, V.EvidenceUnhashed, V.PaymentTxNotFound,
+                    V.PaymentTxFailed, V.PaymentNoValue, V.EvidenceUnreachable, V.EvidenceAbsent]
+  for (const v of accepted) {
+    await chain.call(ATTESTER, addr, 'attest', [BigInt(v), REVIEWER, 0n, v, ZERO32, EH1])
+    assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [BigInt(v), REVIEWER, 0n])).result, true, `verdict ${v}`)
+  }
+  for (const v of rejected) {
+    await chain.call(ATTESTER, addr, 'attest', [BigInt(v), REVIEWER, 0n, v, ZERO32, EH1])
+    assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [BigInt(v), REVIEWER, 0n])).result, false, `verdict ${v}`)
+  }
+})
+
+await check('an unattested record has neither intact evidence nor payment backing', async () => {
+  const { chain, addr } = await fresh()
+  assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [42n, REVIEWER, 0n])).result, false)
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentBacked', [42n, REVIEWER, 0n])).result, false)
+})
+
+await check('totalAttestations counts writes, re-attestations included', async () => {
+  const { chain, addr } = await fresh()
+  assert.equal((await chain.call(STRANGER, addr, 'totalAttestations', [])).result, 0n)
+  await chain.call(ATTESTER, addr, 'attest', [1n, REVIEWER, 0n, V.EvidenceIntact, ZERO32, EH1])
+  await chain.call(ATTESTER, addr, 'attest', [1n, REVIEWER, 0n, V.PaymentVerified, TX1, EH1])
+  await chain.call(ATTESTER, addr, 'attest', [2n, REVIEWER, 0n, V.EvidenceAbsent, ZERO32, EH1])
+  assert.equal((await chain.call(STRANGER, addr, 'totalAttestations', [])).result, 3n)
+})
+
+await check('an empty batch is rejected rather than counted as a no-op success', async () => {
+  const { chain, addr } = await fresh()
+  const r = await chain.call(ATTESTER, addr, 'attestBatch', [[], [], [], [], [], []])
+  assert.equal(r.selector, ERRORS.EmptyBatch)
 })
 
 console.log(`\n${passed} passed\n`)

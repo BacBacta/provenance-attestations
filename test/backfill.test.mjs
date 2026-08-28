@@ -24,12 +24,30 @@ check('CSV parsing survives quoted commas and yields named fields', () => {
   assert.equal(rows[2].feedbackURI, 'https://x.example/c, with comma.json')
 })
 
-check('verdict mapping covers all four audited outcomes', () => {
+check('the legacy claims file still maps correctly without a rung column', () => {
   const [ok, notFound, zero, malformed] = parseClaimsCsv(CSV)
   assert.equal(verdictOf(ok), Verdict.PaymentVerified)
-  assert.equal(verdictOf(notFound), Verdict.TxNotFound)
-  assert.equal(verdictOf(zero), Verdict.NoValueMoved)
-  assert.equal(verdictOf(malformed), Verdict.TxNotFound)
+  assert.equal(verdictOf(notFound), Verdict.PaymentTxNotFound)
+  assert.equal(verdictOf(zero), Verdict.PaymentNoValue)
+  assert.equal(verdictOf(malformed), Verdict.PaymentTxNotFound)
+})
+
+check('when the audit names the rung, that name wins over re-derivation', () => {
+  // One ladder, defined once in the audit. Two implementations would drift.
+  assert.equal(verdictOf({ rung: 'EvidenceIntact' }), Verdict.EvidenceIntact)
+  assert.equal(verdictOf({ rung: 'EvidenceAbsent' }), Verdict.EvidenceAbsent)
+  assert.equal(verdictOf({ rung: 'PaymentVerified', paymentVerified: 'false' }), Verdict.PaymentVerified)
+})
+
+check('an unknown rung falls through to the booleans rather than writing garbage', () => {
+  assert.equal(verdictOf({ rung: 'SomethingNew', fetched: 'true', hashMatched: 'true' }), Verdict.EvidenceIntact)
+})
+
+check('the non-payment rungs are reachable from booleans alone', () => {
+  assert.equal(verdictOf({ fetched: 'true', hashMatched: 'true' }), Verdict.EvidenceIntact)
+  assert.equal(verdictOf({ fetched: 'true', hashMatched: 'false' }), Verdict.EvidenceUnhashed)
+  assert.equal(verdictOf({ fetched: 'false', hasURI: 'true' }), Verdict.EvidenceUnreachable)
+  assert.equal(verdictOf({ fetched: 'false', hasURI: 'false' }), Verdict.EvidenceAbsent)
 })
 
 check('a malformed hash becomes the zero payment reference, a valid one is kept', () => {

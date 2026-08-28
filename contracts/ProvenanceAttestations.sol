@@ -2,51 +2,68 @@
 pragma solidity 0.8.28;
 
 /// @title  ProvenanceAttestations
-/// @notice On-chain verification verdicts for ERC-8004 reputation feedback on Celo.
+/// @notice On-chain evidence-integrity verdicts for ERC-8004 reputation
+///         feedback on Celo.
 ///
 /// @dev    WHY THIS EXISTS
 ///         The ERC-8004 Reputation Registry lets anyone score any agent. The
-///         standard leaves a slot for evidence — an optional `proofOfPayment`
-///         naming the transaction a review is about — but nothing requires it
-///         and nothing checks it. A full-history census of the Celo registry
-///         (27,520 records, Feb–Aug 2026) found 93 records declaring a payment,
-///         of which 76 name transactions that do not exist on Celo, and a third
-///         of the registry attesting hashes with no file published at all.
+///         standard leaves room for evidence — an off-chain file, its attested
+///         hash, and an optional `proofOfPayment` naming the transaction the
+///         review is about — but nothing requires any of it and nothing checks
+///         it. A full-history census of the Celo registry (27,520 records,
+///         Feb–Aug 2026) found that 38% declare an evidence file, three
+///         quarters of those files are dead links, 35% attest a hash while
+///         publishing no file at all, 93 records name a payment, and 17 of
+///         those payments exist.
 ///
-///         This contract is the missing verifier's ledger: for a given feedback
-///         record, it stores the outcome of actually checking the claim against
-///         the chain. It scores nothing and ranks nothing — it records whether
-///         the evidence holds, so that scorers, marketplaces and routers can
+///         This contract is the verifier's ledger: for a given feedback record
+///         it stores how far its evidence actually holds up. It scores nothing
+///         and ranks nothing — scorers, marketplaces and routers read it to
 ///         weight feedback by something harder than assertion.
 ///
+/// @dev    WHAT CHANGED FROM v1
+///         v1 could only express payment outcomes, so it could only speak about
+///         the 93 records that declare a payment — a third of a percent of the
+///         registry. The verdict set below covers the whole evidence ladder, of
+///         which a settled payment is simply the top rung. Its own audit then
+///         forced two refinements before deployment: a dead file served as an
+///         HTML page with HTTP 200 is unreachable, not mismatched; and a live
+///         file with no attested hash is unbound, not mismatched — there was
+///         never anything to contradict. Values are append-only from here:
+///         indexers depend on them.
+///
 /// @dev    TRUST MODEL, STATED PLAINLY
-///         Verdicts are written by a single accountable attester (rotatable by
-///         the owner). This is honest centralization: the attestation process
-///         is open source and reproducible (github.com/BacBacta/celo-agent-
-///         feedback-audit), so any party can re-run it and dispute a verdict
-///         publicly. Decentralizing the attester (staked re-execution, multi-
-///         attester quorum) is roadmap, not premise. The contract custodies no
-///         funds, has no payable path, and makes no external calls.
+///         Verdicts are written by a single accountable attester, rotatable by
+///         the owner. This is honest centralization: the attestation process is
+///         open source and reproducible, so any party can re-run it and dispute
+///         a verdict publicly. Decentralizing the attester (staked re-execution,
+///         multi-attester quorum) is roadmap, not premise. The contract
+///         custodies no funds, has no payable path, and makes no external calls.
 contract ProvenanceAttestations {
     // ---------------------------------------------------------------- types
 
-    /// @notice Outcome of verifying one feedback record's payment claim.
-    /// @dev    Values are stable API — indexers depend on them. Append only.
+    /// @notice How far a feedback record's evidence survives verification.
+    /// @dev    Ordered strongest to weakest. `None` is the mapping default and
+    ///         can never be written, so "never attested" stays unforgeable.
     enum Verdict {
-        None,                // 0 — never attested (mapping default; never written)
-        PaymentVerified,     // 1 — claimed tx exists, succeeded, moved value
-        TxNotFound,          // 2 — claimed tx absent from Celo (or claim malformed)
-        TxFailed,            // 3 — claimed tx exists but reverted
-        NoValueMoved,        // 4 — claimed tx exists, succeeded, moved nothing relevant
-        EvidenceUnreachable  // 5 — feedback file no longer resolvable at check time
+        None,                 // 0 — never attested
+        PaymentVerified,      // 1 — declared payment exists, succeeded, moved value
+        EvidenceIntact,       // 2 — file resolves as valid JSON and matches its attested hash
+        EvidenceUnbound,      // 3 — file resolves as valid JSON but no hash was attested: nothing binds it
+        EvidenceUnhashed,     // 4 — file resolves as valid JSON and contradicts its attested hash
+        PaymentTxNotFound,    // 5 — a payment was declared; it is not on this chain
+        PaymentTxFailed,      // 6 — declared payment exists but reverted
+        PaymentNoValue,       // 7 — declared payment succeeded but moved nothing relevant
+        EvidenceUnreachable,  // 8 — the declared file no longer resolves to evidence (dead link or soft-404)
+        EvidenceAbsent        // 9 — a hash was attested with no file published at all
     }
 
     struct Attestation {
         Verdict verdict;      // outcome of the latest check
         uint40 checkedAt;     // block.timestamp of the latest check
         uint32 revision;      // number of times this record has been attested
-        bytes32 paymentTx;    // claimed payment tx hash (0x0 when none was checkable)
-        bytes32 evidenceHash; // registry's feedbackHash for the record, for cross-reference
+        bytes32 paymentTx;    // declared payment tx hash (0x0 when none was declared)
+        bytes32 evidenceHash; // the registry's own feedbackHash, for cross-reference
     }
 
     // ---------------------------------------------------------------- state
@@ -55,8 +72,12 @@ contract ProvenanceAttestations {
     address public attester;
 
     /// @dev key(agentId, clientAddress, feedbackIndex) => latest attestation.
-    ///      Prior revisions remain fully reconstructable from event history.
+    ///      Prior revisions stay fully reconstructable from event history.
     mapping(bytes32 => Attestation) private _attestations;
+
+    /// @notice Total attestation writes, including re-attestations. Cheap
+    ///         liveness signal for anyone watching the service.
+    uint256 public totalAttestations;
 
     // ---------------------------------------------------------------- events
 
@@ -64,8 +85,8 @@ contract ProvenanceAttestations {
     event AttesterChanged(address indexed previousAttester, address indexed newAttester);
 
     /// @notice Emitted on every attestation, including re-attestations.
-    /// @dev    The full (agentId, clientAddress, feedbackIndex) tuple mirrors the
-    ///         ERC-8004 registry's own keying, so indexers can join without state.
+    /// @dev    Mirrors the registry's own (agentId, clientAddress, feedbackIndex)
+    ///         keying so indexers can join without holding state.
     event FeedbackAttested(
         uint256 indexed agentId,
         address indexed clientAddress,
@@ -83,6 +104,7 @@ contract ProvenanceAttestations {
     error ZeroAddress();
     error LengthMismatch();
     error InvalidVerdict();
+    error EmptyBatch();
 
     // ------------------------------------------------------------- modifiers
 
@@ -123,10 +145,10 @@ contract ProvenanceAttestations {
     // ---------------------------------------------------------------- write
 
     /// @notice Record the verification outcome for one feedback record.
-    /// @dev    Re-attesting the same record overwrites the stored latest state
-    ///         and bumps `revision` — deliberately, because verdicts can change:
-    ///         a file dies later, a transaction appears later. History lives in
-    ///         events, which cannot be rewritten.
+    /// @dev    Re-attesting overwrites the stored state and bumps `revision`,
+    ///         deliberately: verdicts change over time — a file dies, a
+    ///         transaction appears. History lives in events, which cannot be
+    ///         rewritten.
     function attest(
         uint256 agentId,
         address clientAddress,
@@ -135,22 +157,16 @@ contract ProvenanceAttestations {
         bytes32 paymentTx,
         bytes32 evidenceHash
     ) public onlyAttester {
-        // None is the "absence" value; writing it would let an attestation
-        // masquerade as no-attestation.
         if (verdict == Verdict.None) revert InvalidVerdict();
 
-        bytes32 k = key(agentId, clientAddress, feedbackIndex);
-        Attestation storage a = _attestations[k];
-
+        Attestation storage a = _attestations[key(agentId, clientAddress, feedbackIndex)];
         a.verdict = verdict;
         a.checkedAt = uint40(block.timestamp);
-        unchecked {
-            // 2^32 re-attestations of one record is not a realistic path; if it
-            // ever wraps, events still carry the truth.
-            a.revision += 1;
-        }
+        unchecked { a.revision += 1; }
         a.paymentTx = paymentTx;
         a.evidenceHash = evidenceHash;
+
+        unchecked { totalAttestations += 1; }
 
         emit FeedbackAttested(
             agentId, clientAddress, feedbackIndex, verdict, paymentTx, evidenceHash, a.revision
@@ -167,6 +183,7 @@ contract ProvenanceAttestations {
         bytes32[] calldata evidenceHashes
     ) external onlyAttester {
         uint256 n = agentIds.length;
+        if (n == 0) revert EmptyBatch();
         if (
             clientAddresses.length != n || feedbackIndexes.length != n ||
             verdicts.length != n || paymentTxs.length != n || evidenceHashes.length != n
@@ -182,34 +199,37 @@ contract ProvenanceAttestations {
 
     // ----------------------------------------------------------------- read
 
-    /// @notice Canonical storage key for a feedback record, mirroring the
-    ///         ERC-8004 registry's (agentId, clientAddress, feedbackIndex) tuple.
+    /// @notice Canonical storage key, mirroring the ERC-8004 registry's tuple.
     function key(uint256 agentId, address clientAddress, uint64 feedbackIndex)
-        public
-        pure
-        returns (bytes32)
+        public pure returns (bytes32)
     {
         return keccak256(abi.encode(agentId, clientAddress, feedbackIndex));
     }
 
-    /// @notice Latest attestation for a feedback record. `verdict == None`
-    ///         means the record has never been attested.
+    /// @notice Latest attestation. `verdict == None` means never attested.
     function getAttestation(uint256 agentId, address clientAddress, uint64 feedbackIndex)
-        external
-        view
-        returns (Attestation memory)
+        external view returns (Attestation memory)
     {
         return _attestations[key(agentId, clientAddress, feedbackIndex)];
     }
 
-    /// @notice One-call integration surface: does this feedback rest on a
-    ///         verified settled payment, as of the latest check?
+    /// @notice Strictest integration surface: is this feedback backed by a
+    ///         payment that was verified to have settled?
     function isPaymentBacked(uint256 agentId, address clientAddress, uint64 feedbackIndex)
-        external
-        view
-        returns (bool)
+        external view returns (bool)
     {
         return _attestations[key(agentId, clientAddress, feedbackIndex)].verdict
             == Verdict.PaymentVerified;
+    }
+
+    /// @notice Looser surface for consumers that only need to discard feedback
+    ///         resting on nothing: true when the evidence was retrievable and
+    ///         matched what was attested on chain, whether or not a payment was
+    ///         declared.
+    function hasIntactEvidence(uint256 agentId, address clientAddress, uint64 feedbackIndex)
+        external view returns (bool)
+    {
+        Verdict v = _attestations[key(agentId, clientAddress, feedbackIndex)].verdict;
+        return v == Verdict.PaymentVerified || v == Verdict.EvidenceIntact;
     }
 }

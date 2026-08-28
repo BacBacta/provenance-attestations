@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "operation": "register",
+  "sessionId": "c96109b346058e38aff2791ae67e7ab0",
+  "createdAt": "2026-08-28T11:37:39.283Z",
+  "expiresAt": "2026-08-28T12:07:39.296Z",
+  "mode": "linked",
+  "disclosures": {
+    "minimumAge": 18,
+    "ofac": true,
+    "nationality": false,
+    "name": false,
+    "date_of_birth": false,
+    "gender": false,
+    "issuing_state": false
+  },
+  "network": {
+    "chainId": 42220,
+    "registryAddress": "0xaC3DF9ABf80d0F5c020C06B04Cced27763355944",
+    "rpcUrl": "https://forno.celo.org",
+    "endpointType": "celo",
+    "appUrl": "https://self-agent-id.vercel.app",
+    "appName": "Self Agent ID",
+    "scope": "self-agent-id"
+  },
+  "registration": {
+    "humanIdentifier": "0xC2Dc6B2853a8deAE5C0A6432B77F226d67B2972A",
+    "agentAddress": "0x51899235906dE7692408e3edD71f704047d65CC8",
+    "userDefinedData": "K451899235906de7692408e3edd71f704047d65cc8d25b14ced2b7b5a9950fd69e98e448893ea4c896b4416dd2d8381e12baaa1d5866b155aa6976fa4d782cb7b047c824124354cc3a891f30ca1d643583f6941bac1c",
+    "challengeHash": "0x98b3dddf5149eb3e97a3cb2f286d202d3fdf103c0e27070b64e41cfe1613aa43",
+    "signature": {
+      "r": "0xd25b14ced2b7b5a9950fd69e98e448893ea4c896b4416dd2d8381e12baaa1d58",
+      "s": "0x66b155aa6976fa4d782cb7b047c824124354cc3a891f30ca1d643583f6941bac",
+      "v": 28
+    }
+  },
+  "callback": {
+    "listenHost": "127.0.0.1",
+    "listenPort": 37839,
+    "path": "/callback",
+    "stateToken": "e6105973e103cd6faa5acbf45953f343d8b764fc22c60b9f",
+    "used": false
+  },
+  "state": {
+    "stage": "handoff_opened",
+    "updatedAt": "2026-08-28T11:39:12.234Z"
+  },
+  "secrets": {
+    "agentPrivateKey": "0x081603b5e304d53e6da146a5249deee282aebcc92c29f97b07434ee00763ec9d"
+  }
+}

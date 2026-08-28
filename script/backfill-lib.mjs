@@ -32,25 +32,43 @@ function splitRow(line) {
   return out
 }
 
+/** Mirrors the on-chain enum exactly. Names are the contract's, not ours. */
 export const Verdict = {
-  None: 0, PaymentVerified: 1, TxNotFound: 2, TxFailed: 3, NoValueMoved: 4, EvidenceUnreachable: 5,
+  None: 0,
+  PaymentVerified: 1,
+  EvidenceIntact: 2,
+  EvidenceUnbound: 3,
+  EvidenceUnhashed: 4,
+  PaymentTxNotFound: 5,
+  PaymentTxFailed: 6,
+  PaymentNoValue: 7,
+  EvidenceUnreachable: 8,
+  EvidenceAbsent: 9,
 }
 
 /**
- * Map one audited claim to its on-chain verdict.
+ * Map one audited row to its on-chain verdict.
  *
- * The order matters: a verified payment wins outright; a transaction that was
- * never found (or a malformed hash — same epistemic state: nothing checkable
- * at that reference) is TxNotFound; an existing transaction that moved nothing
- * relevant is NoValueMoved; what remains is an existing transaction that
- * failed.
+ * The audit already names the rung it reached, in the contract's own
+ * vocabulary — so the safe path is to trust that name rather than re-derive it
+ * here from booleans. Two implementations of the same ladder would eventually
+ * disagree, and the disagreement would be invisible.
+ *
+ * The boolean fallback exists only for the older claims.csv, which predates the
+ * `rung` column.
  */
 export function verdictOf(row) {
+  if (row.rung && Verdict[row.rung] !== undefined) return Verdict[row.rung]
+
   if (row.paymentVerified === 'true') return Verdict.PaymentVerified
-  if (row.txExistsOnCelo !== 'true') return Verdict.TxNotFound
-  const note = (row.note ?? '').toLowerCase()
-  if (note.includes('transfer of zero') || note.includes('no stablecoin')) return Verdict.NoValueMoved
-  return Verdict.TxFailed
+  if (row.claimsPayment === 'true' || row.claimTxHash) {
+    if (row.txExistsOnCelo !== 'true') return Verdict.PaymentTxNotFound
+    const note = (row.note ?? '').toLowerCase()
+    if (note.includes('transfer of zero') || note.includes('no stablecoin')) return Verdict.PaymentNoValue
+    return Verdict.PaymentTxFailed
+  }
+  if (row.fetched === 'true') return row.hashMatched === 'true' ? Verdict.EvidenceIntact : Verdict.EvidenceUnhashed
+  return row.hasURI === 'true' ? Verdict.EvidenceUnreachable : Verdict.EvidenceAbsent
 }
 
 const WELL_FORMED = /^0x[0-9a-fA-F]{64}$/
@@ -100,7 +118,9 @@ export function buildAttestations(claims, cacheIndex) {
       feedbackIndex: hit.feedbackIndex,
       verdict: verdictOf(c),
       paymentTx: paymentTxOf(c),
-      evidenceHash: hit.evidenceHash,
+      // Prefer the hash the audit read from the event itself; fall back to the
+      // cache join for the older claims file, which does not carry it.
+      evidenceHash: /^0x[0-9a-fA-F]{64}$/.test(c.evidenceHash ?? '') ? c.evidenceHash : hit.evidenceHash,
     })
   }
   return { rows, missing }

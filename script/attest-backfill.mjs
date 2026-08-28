@@ -13,16 +13,21 @@
 import { createWalletClient, createPublicClient, http } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { celo } from 'viem/chains'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { parseClaimsCsv, indexCache, buildAttestations, chunk } from './backfill-lib.mjs'
 
 const DRY = process.env.DRY_RUN !== '0'
 const RPC = process.env.CELO_RPC_URL ?? 'https://forno.celo.org'
-const CLAIMS = process.env.CLAIMS_CSV ?? '../celo-agent-feedback-audit/out/claims.csv'
+// Defaults to the full evidence ladder; CLAIMS_CSV still points it at the
+// narrower payment-claims file when only those are wanted.
+const CLAIMS = process.env.CLAIMS_CSV ?? '../celo-agent-feedback-audit/out/evidence.csv'
 const CACHE = process.env.FEEDBACK_CACHE ?? '../celo-agent-feedback-audit/data-bs/feedback-58396729.jsonl'
-const BATCH = Number(process.env.BATCH_SIZE ?? 60)
+const BATCH = Number(process.env.BATCH_SIZE ?? 100)
+// Batches already written, so an interrupted backfill of ~10,000 rows resumes
+// instead of paying twice and doubling every revision counter.
+const PROGRESS = process.env.PROGRESS_FILE ?? 'deployments/backfill-progress.json'
 
-for (const [name, path] of [['claims.csv', CLAIMS], ['feedback cache', CACHE]]) {
+for (const [name, path] of [['input csv', CLAIMS], ['feedback cache', CACHE]]) {
   if (!existsSync(path)) {
     console.error(`${name} not found at ${path} — set CLAIMS_CSV / FEEDBACK_CACHE.`)
     process.exit(1)
@@ -33,11 +38,17 @@ const claims = parseClaimsCsv(readFileSync(CLAIMS, 'utf8'))
 const cacheIndex = indexCache(readFileSync(CACHE, 'utf8').split('\n').filter(Boolean))
 const { rows, missing } = buildAttestations(claims, cacheIndex)
 
+const NAMES = ['None', 'PaymentVerified', 'EvidenceIntact', 'EvidenceUnbound', 'EvidenceUnhashed',
+  'PaymentTxNotFound', 'PaymentTxFailed', 'PaymentNoValue', 'EvidenceUnreachable', 'EvidenceAbsent']
 const byVerdict = {}
-for (const r of rows) byVerdict[r.verdict] = (byVerdict[r.verdict] ?? 0) + 1
-console.log(`claims        ${claims.length}`)
+for (const r of rows) byVerdict[NAMES[r.verdict] ?? r.verdict] = (byVerdict[NAMES[r.verdict] ?? r.verdict] ?? 0) + 1
+console.log(`input rows    ${claims.length}`)
 console.log(`joined        ${rows.length}`)
-console.log(`verdicts      ${JSON.stringify(byVerdict)}  (1=verified 2=notfound 3=failed 4=novalue)`)
+console.log('verdicts:')
+for (const [k, n] of Object.entries(byVerdict).sort((a, b) => b[1] - a[1])) {
+  console.log(`  ${k.padEnd(20)} ${String(n).padStart(6)}`)
+}
+console.log(`batches       ${Math.ceil(rows.length / BATCH)} of up to ${BATCH}`)
 if (missing.length) {
   console.log(`\nNOT JOINED (${missing.length}) — investigate before a real run:`)
   for (const m of missing) console.log(`  agent ${m.agentId} reviewer ${m.reviewer} uri ${m.feedbackURI}`)
@@ -59,7 +70,13 @@ const wallet = createWalletClient({ account, chain: celo, transport: http(RPC) }
 console.log(`\ncontract      ${deployment.address}`)
 console.log(`attester      ${account.address}`)
 
-for (const [i, part] of chunk(rows, BATCH).entries()) {
+let doneBatches = 0
+try { doneBatches = JSON.parse(readFileSync(PROGRESS, 'utf8')).completedBatches ?? 0 } catch { /* first run */ }
+const allBatches = chunk(rows, BATCH)
+if (doneBatches) console.log(`resuming after ${doneBatches} completed batch(es)`)
+
+for (const [i, part] of allBatches.entries()) {
+  if (i < doneBatches) continue
   const hash = await wallet.writeContract({
     address: deployment.address,
     abi,
@@ -74,7 +91,8 @@ for (const [i, part] of chunk(rows, BATCH).entries()) {
     ],
   })
   const receipt = await pub.waitForTransactionReceipt({ hash })
-  console.log(`batch ${i + 1}: ${part.length} attestations — ${receipt.status} — ${hash}`)
+  console.log(`batch ${i + 1}/${allBatches.length}: ${part.length} attestations — ${receipt.status} — ${hash}`)
   if (receipt.status !== 'success') process.exit(1)
+  writeFileSync(PROGRESS, JSON.stringify({ completedBatches: i + 1, of: allBatches.length, updatedAt: new Date().toISOString() }))
 }
 console.log('\nBackfill complete.')

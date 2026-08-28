@@ -64,5 +64,6 @@ export const ERRORS = {
   NotAttester: toFunctionSelector('NotAttester()'),
   ZeroAddress: toFunctionSelector('ZeroAddress()'),
   LengthMismatch: toFunctionSelector('LengthMismatch()'),
+  EmptyBatch: toFunctionSelector('EmptyBatch()'),
   InvalidVerdict: toFunctionSelector('InvalidVerdict()'),
 }

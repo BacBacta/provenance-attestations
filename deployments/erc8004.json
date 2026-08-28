@@ -1,0 +1,9 @@
+{
+  "agentId": "9786",
+  "agentURI": "https://raw.githubusercontent.com/BacBacta/provenance-attestations/main/agent.json",
+  "registry": "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432",
+  "owner": "0xC2Dc6B2853a8deAE5C0A6432B77F226d67B2972A",
+  "txHash": "0xdea33440af011899113663bdc8408787e0bc8033bb5b6b85f21291f19d0f69ad",
+  "block": "76014536",
+  "registeredAt": "2026-08-28T11:08:14.476Z"
+}
