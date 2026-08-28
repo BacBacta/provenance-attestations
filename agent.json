@@ -10,7 +10,7 @@
     },
     {
       "name": "attestation-contract",
-      "endpoint": "eip155:42220:0x59ab7fc0ca6fdfbd45d3135be3198cfcbd9f8215",
+      "endpoint": "eip155:42220:0x3ed53c9bf7f7b5026eae83e4d62abdbd748a01ab",
       "version": "0.1.0"
     },
     {
