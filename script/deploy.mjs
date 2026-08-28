@@ -7,6 +7,22 @@
  * Uses a plain wallet transaction — no framework, no factory. The deployer
  * becomes the owner; the attester defaults to the deployer and can be rotated
  * later with setAttester.
+ *
+ * SPLIT THE ROLES. The two roles are not the same risk and should not be the
+ * same key. The attester signs constantly and lives wherever the pipeline runs;
+ * the owner signs almost never and exists to rotate a compromised attester. Put
+ * them on one key and that defence is gone the moment the hot key is: whoever
+ * takes it can also rotate itself back in.
+ *
+ *   ATTESTER=0x<hot key> npm run deploy     # deploy from the COLD key
+ *
+ * With ATTESTER set, the deployer (cold) owns the contract and the hot key does
+ * nothing but attest. If you must deploy from the hot key, hand ownership over
+ * afterwards — the transfer is two-step, so the cold key has to accept before it
+ * takes effect and a mistyped address cannot lock the contract:
+ *
+ *   transferOwnership(<cold>)   from the hot key
+ *   acceptOwnership()           from the cold key
  */
 import { createWalletClient, createPublicClient, http, formatEther } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
@@ -30,9 +46,17 @@ const pub = createPublicClient({ chain: celo, transport: http(RPC) })
 const wallet = createWalletClient({ account, chain: celo, transport: http(RPC) })
 
 const balance = await pub.getBalance({ address: account.address })
-console.log(`deployer  ${account.address}`)
+console.log(`deployer  ${account.address}  (becomes owner)`)
 console.log(`balance   ${formatEther(balance)} CELO`)
 console.log(`attester  ${attester}`)
+if (attester.toLowerCase() === account.address.toLowerCase()) {
+  console.log('')
+  console.log('  ! owner and attester will be the SAME key.')
+  console.log('    The owner\'s only power is rotating a compromised attester, and that')
+  console.log('    defence is worthless if the same key is the one compromised.')
+  console.log('    Deploy from a cold key with ATTESTER=<hot key>, or hand ownership')
+  console.log('    over afterwards with transferOwnership + acceptOwnership.')
+}
 if (balance === 0n) {
   console.error('\nThe deployer holds no CELO. Fund it with ~2 CELO and re-run.')
   process.exit(1)
@@ -65,4 +89,8 @@ console.log(`block     ${receipt.blockNumber}`)
 console.log(`explorer  https://celo.blockscout.com/address/${receipt.contractAddress}`)
 console.log('\nNext: verify the source on the explorer (Contract → Verify & publish →')
 console.log('Standard JSON input → upload out/standard-input.json, compiler v0.8.28).')
+if (attester.toLowerCase() === account.address.toLowerCase()) {
+  console.log('Then: move ownership to a cold key — transferOwnership(<cold>) here,')
+  console.log('      acceptOwnership() from the cold key.')
+}
 console.log('Then: DRY_RUN=1 npm run backfill')

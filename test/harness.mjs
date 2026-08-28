@@ -15,9 +15,32 @@ const BYTECODE = readFileSync('out/ProvenanceAttestations.bin', 'utf8').trim()
 const hex = (u8) => '0x' + Buffer.from(u8).toString('hex')
 const bytes = (h) => Uint8Array.from(Buffer.from(h.replace(/^0x/, ''), 'hex'))
 
-export async function newChain() {
+/**
+ * A fixed, realistic block timestamp.
+ *
+ * A bare EVM reports `block.timestamp == 0`, which makes every observation date
+ * look like it is in the contract's future and hides the whole `observedAt`
+ * path behind a revert. Pinning it also keeps `checkedAt` assertable instead of
+ * being noted as untestable.
+ */
+export const BLOCK_TIMESTAMP = 1_790_000_000n // 2026-09-21, after the audited window
+
+export async function newChain(timestamp = BLOCK_TIMESTAMP) {
   const common = new Common({ chain: Mainnet, hardfork: Hardfork.Shanghai })
   const vm = await createVM({ common })
+  const block = {
+    header: {
+      number: 1n,
+      timestamp,
+      cliqueSigner: () => createAddressFromString('0x' + '00'.repeat(20)),
+      coinbase: createAddressFromString('0x' + '00'.repeat(20)),
+      difficulty: 0n,
+      prevRandao: new Uint8Array(32),
+      gasLimit: 30_000_000n,
+      baseFeePerGas: 0n,
+      getBlobGasPrice: () => 0n,
+    },
+  }
 
   async function deploy(caller, ctorArgs) {
     const data = BYTECODE + ctorArgs.replace(/^0x/, '')
@@ -25,6 +48,7 @@ export async function newChain() {
       caller: createAddressFromString(caller),
       data: bytes('0x' + data),
       gasLimit: 10_000_000n,
+      block,
     })
     if (res.execResult.exceptionError) {
       throw new Error(`deploy reverted: ${res.execResult.exceptionError.error}`)
@@ -38,6 +62,7 @@ export async function newChain() {
       to: createAddressFromString(to),
       data: bytes(encodeFunctionData({ abi: ABI, functionName: fn, args })),
       gasLimit: 10_000_000n,
+      block,
     })
     const logs = (res.execResult.logs ?? []).map(([addr, topics, data]) =>
       decodeEventLog({ abi: ABI, topics: topics.map(hex), data: hex(data) }),
@@ -61,9 +86,12 @@ export async function newChain() {
 import { toFunctionSelector } from 'viem'
 export const ERRORS = {
   NotOwner: toFunctionSelector('NotOwner()'),
+  NotPendingOwner: toFunctionSelector('NotPendingOwner()'),
   NotAttester: toFunctionSelector('NotAttester()'),
   ZeroAddress: toFunctionSelector('ZeroAddress()'),
-  LengthMismatch: toFunctionSelector('LengthMismatch()'),
   EmptyBatch: toFunctionSelector('EmptyBatch()'),
   InvalidVerdict: toFunctionSelector('InvalidVerdict()'),
+  MissingPaymentTx: toFunctionSelector('MissingPaymentTx()'),
+  IncoherentAmount: toFunctionSelector('IncoherentAmount()'),
+  ObservationInFuture: toFunctionSelector('ObservationInFuture()'),
 }
