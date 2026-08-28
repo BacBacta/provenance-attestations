@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="Provenance">
+  <title>Provenance</title>
+  <rect width="120" height="120" rx="14" fill="#1C1A19"/>
+  <!-- A claim (outer ring) and the settled payment that anchors it (inner mark).
+       Unanchored claims are the whole problem; the gap between the two is the subject. -->
+  <circle cx="60" cy="60" r="34" fill="none" stroke="#7C3340" stroke-width="3" stroke-dasharray="4 6" opacity="0.85"/>
+  <circle cx="60" cy="60" r="17" fill="none" stroke="#F6F4F0" stroke-width="3"/>
+  <path d="M52 60.5 L58 66.5 L69 54" fill="none" stroke="#F6F4F0" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

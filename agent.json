@@ -1,0 +1,24 @@
+{
+  "type": "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
+  "name": "Provenance",
+  "description": "A validity layer for ERC-8004 reputation on Celo. Provenance verifies whether a feedback record's declared payment actually settled on chain, and publishes the verdict as an on-chain attestation. It scores nothing and ranks nothing: it is the input other scorers, marketplaces and routers read to weight feedback by something harder than assertion. A full-history census of this registry (27,520 records) found 93 records declaring a payment, of which 17 name a transaction that exists — the gap this service closes.",
+  "image": "https://raw.githubusercontent.com/BacBacta/provenance-attestations/main/assets/provenance.svg",
+  "services": [
+    {
+      "name": "web",
+      "endpoint": "https://github.com/BacBacta/provenance-attestations"
+    },
+    {
+      "name": "attestation-contract",
+      "endpoint": "eip155:42220:0x59ab7fc0ca6fdfbd45d3135be3198cfcbd9f8215",
+      "version": "0.1.0"
+    },
+    {
+      "name": "audit-methodology",
+      "endpoint": "https://github.com/BacBacta/celo-agent-feedback-audit"
+    }
+  ],
+  "supportedTrust": ["reputation"],
+  "x402Support": false,
+  "active": true
+}

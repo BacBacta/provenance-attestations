@@ -1,0 +1,10 @@
+{
+  "contract": "ProvenanceAttestations",
+  "address": "0x59ab7fc0ca6fdfbd45d3135be3198cfcbd9f8215",
+  "deployer": "0xC2Dc6B2853a8deAE5C0A6432B77F226d67B2972A",
+  "attester": "0xC2Dc6B2853a8deAE5C0A6432B77F226d67B2972A",
+  "txHash": "0x8b88cc4cf686890f8d1fb0da884756b584daef7758eb19339a1a3191659d64ac",
+  "block": "76003568",
+  "chainId": 42220,
+  "deployedAt": "2026-08-28T08:05:33.543Z"
+}
