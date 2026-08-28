@@ -94,4 +94,5 @@ export const ERRORS = {
   MissingPaymentTx: toFunctionSelector('MissingPaymentTx()'),
   IncoherentAmount: toFunctionSelector('IncoherentAmount()'),
   ObservationInFuture: toFunctionSelector('ObservationInFuture()'),
+  DimensionMismatch: toFunctionSelector('DimensionMismatch()'),
 }

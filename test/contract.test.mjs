@@ -279,9 +279,18 @@ console.log('\ninvariants — a rung cannot contradict its own payload')
 
 await check('a rung asserting the transaction was found must carry it', async () => {
   const { chain, addr } = await fresh()
-  for (const v of [V.PaymentVerified, V.PaymentAttributed, V.PaymentPartyMismatch, V.PaymentTxFailed, V.PaymentNoValue]) {
+  // Each verdict paired with the payment state it implies, so the failure under
+  // test is the missing hash and not the dimension mismatch.
+  const pairs = [
+    [V.PaymentVerified, P.Verified],
+    [V.PaymentAttributed, P.Attributed],
+    [V.PaymentPartyMismatch, P.PartyMismatch],
+    [V.PaymentTxFailed, P.Failed],
+    [V.PaymentNoValue, P.NoValue],
+  ]
+  for (const [v, p] of pairs) {
     const r = await chain.call(ATTESTER, addr, 'attest', [claim({
-      verdict: v, payment: P.Verified, paymentTx: ZERO32, amount: 0n,
+      verdict: v, payment: p, paymentTx: ZERO32, amount: 0n,
     })])
     assert.equal(r.selector, ERRORS.MissingPaymentTx, `verdict ${v} accepted a zero tx hash`)
   }
@@ -313,6 +322,59 @@ await check('an observation dated after the block recording it is refused', asyn
   // its future — which is exactly the condition under test.
   const r = await chain.call(ATTESTER, addr, 'attest', [claim({ observedAt: 2_000_000_000 })])
   assert.equal(r.selector, ERRORS.ObservationInFuture)
+})
+
+await check('the strong claim cannot be reached through the payment dimension alone', async () => {
+  /**
+   * The hole the verdict-only invariants left open. `isPaymentAttributed` and
+   * `isPaymentBacked` read the PAYMENT field, but validation only looked at
+   * `verdict` — so a claim whose headline was a harmless documentary rung could
+   * carry `payment: Attributed` with no transaction and no amount, pass every
+   * check, and then answer true to the strongest question in the system.
+   */
+  const { chain, addr } = await fresh()
+  const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceIntact, evidence: E.Intact,
+    payment: P.Attributed, paymentTx: ZERO32, amount: 0n, paymentToken: ZERO_ADDR,
+  })])
+  assert.equal(r.reverted, true, 'an attribution with nothing behind it was accepted')
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributed', [1n, REVIEWER, 0n])).result, false)
+})
+
+await check('every payment state asserting the transaction exists must name it', async () => {
+  const { chain, addr } = await fresh()
+  for (const p of [P.Verified, P.PartyMismatch, P.Failed, P.NoValue]) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: V.EvidenceIntact, evidence: E.Intact, payment: p, paymentTx: ZERO32,
+    })])
+    assert.equal(r.selector, ERRORS.MissingPaymentTx, `payment ${p} accepted a zero tx hash`)
+  }
+})
+
+await check('the headline and the payment dimension cannot name different outcomes', async () => {
+  // Otherwise an indexer reading `verdict` and a router reading
+  // `isPaymentAttributed` disagree about the same record.
+  const { chain, addr } = await fresh()
+  const bad = await chain.call(ATTESTER, addr, 'attest', [attributed({ payment: P.Unknown })])
+  assert.equal(bad.selector, ERRORS.DimensionMismatch)
+  const alsoBad = await chain.call(ATTESTER, addr, 'attest', [attributed({ payment: P.Verified })])
+  assert.equal(alsoBad.selector, ERRORS.DimensionMismatch)
+  assert.equal((await chain.call(ATTESTER, addr, 'attest', [attributed()])).reverted, false)
+})
+
+await check('a token with no amount is refused, like an amount with no token', async () => {
+  const { chain, addr } = await fresh()
+  const r = await chain.call(ATTESTER, addr, 'attest', [claim({ amount: 0n, paymentToken: TOKEN })])
+  assert.equal(r.selector, ERRORS.IncoherentAmount)
+})
+
+await check('a threshold of zero against no token does not pass for an unattested record', async () => {
+  // `isPaymentAttributedAtLeast(…, 0, 0x0)` must not be a free "yes".
+  const { chain, addr } = await fresh()
+  assert.equal(
+    (await chain.call(STRANGER, addr, 'isPaymentAttributedAtLeast', [1n, REVIEWER, 0n, 0n, ZERO_ADDR])).result,
+    false,
+  )
 })
 
 await check('a verdict beyond the enum is rejected, not silently coerced', async () => {
@@ -366,6 +428,12 @@ await check('the sticky payment state is what the event reports, not the blank i
   })])
   assert.equal(r.logs[0].args.paymentTx, TX1)
   assert.equal(r.logs[0].args.amount, 1_000_000n)
+  // The field itself, not only its payload: the event used to echo the caller's
+  // blank `Unknown` while the mapping kept `Attributed`, so an indexer
+  // rebuilding state from events alone disagreed with a direct reader.
+  assert.equal(r.logs[0].args.payment, P.Attributed)
+  assert.equal(r.logs[0].args.paymentToken.toLowerCase(), TOKEN)
+  assert.equal(r.logs[0].args.amountDecimals, 6)
 })
 
 console.log('\nbatching')

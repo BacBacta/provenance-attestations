@@ -215,6 +215,8 @@ contract ProvenanceAttestations {
     error IncoherentAmount();
     /// @dev An observation timestamped after the block that records it.
     error ObservationInFuture();
+    /// @dev The headline verdict and the payment dimension name different outcomes.
+    error DimensionMismatch();
 
     // ------------------------------------------------------------- modifiers
 
@@ -301,7 +303,7 @@ contract ProvenanceAttestations {
             c.verdict,
             c.feedbackIndex,
             c.evidence,
-            c.payment,
+            a.payment,
             a.paymentTx,
             c.evidenceHash,
             a.amount,
@@ -329,29 +331,66 @@ contract ProvenanceAttestations {
     ///      their own payload. A verdict saying the transaction was found while
     ///      carrying no transaction hash, or an attributed payment that moved
     ///      nothing, is not a verdict — it is a bug reaching the ledger.
+    ///
+    ///      Both dimensions are checked, not just the headline. `isPaymentBacked`
+    ///      and `isPaymentAttributed` read the PAYMENT field, so guarding only
+    ///      `verdict` left the strongest claim in the system reachable with
+    ///      nothing behind it: a claim carrying `verdict: EvidenceIntact` and
+    ///      `payment: Attributed` passed every check and then answered true to
+    ///      `isPaymentAttributed`, with no transaction and no amount.
     function _validate(Claim calldata c) private view {
         if (c.verdict == Verdict.None) revert InvalidVerdict();
         if (c.observedAt > uint40(block.timestamp)) revert ObservationInFuture();
 
-        // Rungs that assert the transaction exists must name it. `NotFound` and
-        // `ForeignChain` are exempt: a malformed or unqueryable claim is exactly
-        // the case where there is no well-formed hash to carry.
-        if (
-            c.verdict == Verdict.PaymentVerified ||
-            c.verdict == Verdict.PaymentAttributed ||
-            c.verdict == Verdict.PaymentPartyMismatch ||
-            c.verdict == Verdict.PaymentTxFailed ||
-            c.verdict == Verdict.PaymentNoValue
-        ) {
+        // The two dimensions must agree. A headline that names a payment
+        // outcome while the payment dimension says "nothing evaluated" is a
+        // record whose two readers disagree about the same fact.
+        Payment implied = _impliedPayment(c.verdict);
+        if (implied != Payment.Unknown && c.payment != implied) revert DimensionMismatch();
+
+        // States that assert the transaction was found must name it. `NotFound`
+        // and `ForeignChain` are exempt: a malformed or unqueryable claim is
+        // exactly the case where there is no well-formed hash to carry.
+        if (_assertsTxExists(c.verdict) || _assertsTxExists(c.payment)) {
             if (c.paymentTx == bytes32(0)) revert MissingPaymentTx();
         }
 
         // An attribution with no value is a contradiction: attribution is about
         // who moved money, so nothing moved means nothing to attribute.
-        if (c.verdict == Verdict.PaymentAttributed && c.amount == 0) revert IncoherentAmount();
+        if (
+            (c.verdict == Verdict.PaymentAttributed || c.payment == Payment.Attributed) &&
+            c.amount == 0
+        ) revert IncoherentAmount();
         // An amount denominated in nothing cannot be compared to a threshold,
         // which is the only reason to publish it.
         if (c.amount != 0 && c.paymentToken == address(0)) revert IncoherentAmount();
+        // …and a token with no amount is the same incoherence the other way up.
+        if (c.amount == 0 && c.paymentToken != address(0)) revert IncoherentAmount();
+    }
+
+    /// @dev The payment state a headline rung implies, or `Unknown` for the
+    ///      documentary rungs, which say nothing about a payment either way.
+    function _impliedPayment(Verdict v) private pure returns (Payment) {
+        if (v == Verdict.PaymentAttributed) return Payment.Attributed;
+        if (v == Verdict.PaymentVerified) return Payment.Verified;
+        if (v == Verdict.PaymentPartyMismatch) return Payment.PartyMismatch;
+        if (v == Verdict.PaymentNoValue) return Payment.NoValue;
+        if (v == Verdict.PaymentTxFailed) return Payment.Failed;
+        if (v == Verdict.PaymentTxNotFound) return Payment.NotFound;
+        if (v == Verdict.PaymentForeignChain) return Payment.ForeignChain;
+        return Payment.Unknown;
+    }
+
+    function _assertsTxExists(Verdict v) private pure returns (bool) {
+        return v == Verdict.PaymentVerified || v == Verdict.PaymentAttributed ||
+               v == Verdict.PaymentPartyMismatch || v == Verdict.PaymentTxFailed ||
+               v == Verdict.PaymentNoValue;
+    }
+
+    function _assertsTxExists(Payment p) private pure returns (bool) {
+        return p == Payment.Verified || p == Payment.Attributed ||
+               p == Payment.PartyMismatch || p == Payment.Failed ||
+               p == Payment.NoValue;
     }
 
     // ----------------------------------------------------------------- read
