@@ -1,0 +1,26 @@
+{
+  "name": "provenance-attestations",
+  "version": "0.1.0",
+  "description": "On-chain verification verdicts for ERC-8004 reputation feedback on Celo. The validity layer the registry left out.",
+  "scripts": {
+    "compile": "node script/compile.mjs",
+    "test": "node script/compile.mjs && node test/contract.test.mjs && node test/backfill.test.mjs",
+    "deploy": "node script/compile.mjs && node script/deploy.mjs",
+    "backfill": "node script/attest-backfill.mjs"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "viem": "^2.56.0"
+  },
+  "devDependencies": {
+    "@ethereumjs/common": "^10.1.3",
+    "@ethereumjs/util": "^10.1.3",
+    "@ethereumjs/vm": "^10.1.3",
+    "solc": "^0.8.28"
+  },
+  "private": false,
+  "type": "module",
+  "overrides": {
+    "tmp": "^0.2.6"
+  }
+}

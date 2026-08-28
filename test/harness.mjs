@@ -1,0 +1,68 @@
+/**
+ * Minimal EVM harness on @ethereumjs/vm — no framework, no node, no keys.
+ * `runCall` executes at the message level, so any address can be the caller,
+ * which is exactly what authorization tests need.
+ */
+import { createVM } from '@ethereumjs/vm'
+import { Common, Mainnet, Hardfork } from '@ethereumjs/common'
+import { createAddressFromString } from '@ethereumjs/util'
+import { encodeFunctionData, decodeFunctionResult, decodeEventLog } from 'viem'
+import { readFileSync } from 'node:fs'
+
+export const ABI = JSON.parse(readFileSync('out/ProvenanceAttestations.abi.json', 'utf8'))
+const BYTECODE = readFileSync('out/ProvenanceAttestations.bin', 'utf8').trim()
+
+const hex = (u8) => '0x' + Buffer.from(u8).toString('hex')
+const bytes = (h) => Uint8Array.from(Buffer.from(h.replace(/^0x/, ''), 'hex'))
+
+export async function newChain() {
+  const common = new Common({ chain: Mainnet, hardfork: Hardfork.Shanghai })
+  const vm = await createVM({ common })
+
+  async function deploy(caller, ctorArgs) {
+    const data = BYTECODE + ctorArgs.replace(/^0x/, '')
+    const res = await vm.evm.runCall({
+      caller: createAddressFromString(caller),
+      data: bytes('0x' + data),
+      gasLimit: 10_000_000n,
+    })
+    if (res.execResult.exceptionError) {
+      throw new Error(`deploy reverted: ${res.execResult.exceptionError.error}`)
+    }
+    return hex(res.createdAddress.bytes)
+  }
+
+  async function call(caller, to, fn, args) {
+    const res = await vm.evm.runCall({
+      caller: createAddressFromString(caller),
+      to: createAddressFromString(to),
+      data: bytes(encodeFunctionData({ abi: ABI, functionName: fn, args })),
+      gasLimit: 10_000_000n,
+    })
+    const logs = (res.execResult.logs ?? []).map(([addr, topics, data]) =>
+      decodeEventLog({ abi: ABI, topics: topics.map(hex), data: hex(data) }),
+    )
+    if (res.execResult.exceptionError) {
+      // Surface the custom error selector so tests can assert WHICH revert.
+      const ret = hex(res.execResult.returnValue ?? new Uint8Array())
+      return { reverted: true, selector: ret.slice(0, 10), logs: [] }
+    }
+    let result
+    try {
+      result = decodeFunctionResult({ abi: ABI, functionName: fn, data: hex(res.execResult.returnValue) })
+    } catch { result = undefined }
+    return { reverted: false, result, logs, gasUsed: res.execResult.executionGasUsed }
+  }
+
+  return { deploy, call }
+}
+
+// keccak-256 selectors of the contract's custom errors, for revert assertions.
+import { toFunctionSelector } from 'viem'
+export const ERRORS = {
+  NotOwner: toFunctionSelector('NotOwner()'),
+  NotAttester: toFunctionSelector('NotAttester()'),
+  ZeroAddress: toFunctionSelector('ZeroAddress()'),
+  LengthMismatch: toFunctionSelector('LengthMismatch()'),
+  InvalidVerdict: toFunctionSelector('InvalidVerdict()'),
+}
