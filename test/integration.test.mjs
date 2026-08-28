@@ -12,6 +12,7 @@
  */
 import assert from 'node:assert/strict'
 import { encodeAbiParameters } from 'viem'
+import { readFileSync } from 'node:fs'
 import { newChain, ERRORS } from './harness.mjs'
 import { escapeCell } from '../script/csv.mjs'
 import {
@@ -33,21 +34,45 @@ async function check(name, fn) {
 }
 
 /**
- * The audit's export header, verbatim. If the audit changes it, this constant
- * stops matching and the drift is a test failure rather than a silent
- * mis-parse in production.
+ * The audit's export header — read out of the audit's own source when it is
+ * checked out alongside, and only falling back to this copy when it is not.
+ *
+ * Hard-coding it here was itself a defect: the copy said what this service
+ * WANTED the audit to emit, so a column the audit never wrote (the payment
+ * token's address) looked present in every test while being absent in
+ * production. Reading the real thing turns that class of drift into a failure.
  */
-const HEADER = [
+const HEADER_FALLBACK = [
   'timestamp', 'block', 'agentId', 'reviewer', 'feedbackIndex',
   'rung', 'evidenceRung',
   'hasURI', 'hasHash', 'fetched', 'jsonValid', 'hashMatched', 'inconclusive',
   'claimsPayment', 'txExistsOnCelo', 'paymentVerified', 'paymentAttributed',
   'partiesContradicted', 'onQueryableChain',
-  'claimTxHash', 'claimNetwork', 'amount', 'symbol', 'decimals',
+  'claimTxHash', 'claimNetwork', 'amount', 'symbol', 'decimals', 'token',
   'declaredFrom', 'declaredTo', 'transferFrom', 'transferTo', 'transferCount',
   'evidenceHash', 'contentSha256', 'contentKeccak', 'bytes', 'observedAt', 'via',
   'note', 'partyNote', 'feedbackURI',
 ]
+
+/** Pull the EVIDENCE_HEADER literal out of the audit's exporter, if present. */
+function auditHeader() {
+  for (const path of [
+    '../celo-agent-feedback-audit/src/main.ts',
+    '../bacbacta/celo-agent-feedback-audit/src/main.ts',
+  ]) {
+    let src
+    try { src = readFileSync(path, 'utf8') } catch { continue }
+    const m = /const EVIDENCE_HEADER = \[([\s\S]*?)\]/.exec(src)
+    if (!m) continue
+    const cols = [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1])
+    if (cols.length) return cols
+  }
+  return null
+}
+
+const REAL_HEADER = auditHeader()
+const HEADER = REAL_HEADER ?? HEADER_FALLBACK
+if (!REAL_HEADER) console.log('  (audit repository not checked out alongside — using the recorded header)')
 
 const base = {
   timestamp: '2026-08-20T17:34:44Z', block: '73000001', agentId: '9742', reviewer: REVIEWER,
@@ -56,7 +81,7 @@ const base = {
   inconclusive: 'false', claimsPayment: 'false', txExistsOnCelo: 'false',
   paymentVerified: 'false', paymentAttributed: 'false', partiesContradicted: 'false',
   onQueryableChain: 'true', claimTxHash: '', claimNetwork: '', amount: '', symbol: '',
-  decimals: '', declaredFrom: '', declaredTo: '', transferFrom: '', transferTo: '',
+  decimals: '', token: '', declaredFrom: '', declaredTo: '', transferFrom: '', transferTo: '',
   transferCount: '0', evidenceHash: '0x' + 'aa'.repeat(32), contentSha256: '',
   contentKeccak: '', bytes: '1234', observedAt: '2026-08-20T09:00:00Z', via: 'x.example',
   note: '', partyNote: '', feedbackURI: 'https://x.example/a.json',
@@ -87,18 +112,18 @@ await check('a full ladder round-trips from the audit\'s writer to on-chain stat
       feedbackIndex: '3', rung: 'PaymentAttributed', evidenceRung: 'Intact',
       claimsPayment: 'true', txExistsOnCelo: 'true', paymentVerified: 'true', paymentAttributed: 'true',
       claimTxHash: TX1, claimNetwork: '42220', amount: '500000000', symbol: 'USDC', decimals: '6',
-      transferFrom: REVIEWER, transferTo: AGENT_OWNER, transferCount: '1',
+      token: TOKEN, transferFrom: REVIEWER, transferTo: AGENT_OWNER, transferCount: '1',
     },
   ])
 
   const parsed = parseClaimsCsvStrict(csvText)
   assert.equal(parsed.malformed.length, 0)
   assert.deepEqual(parsed.header, HEADER, 'the export header this service expects has not drifted')
+  assert.ok(HEADER.includes('token'), 'the export must name the token an amount is denominated in')
 
-  // The audit exports `token` under `symbol`/`decimals` plus the address column
-  // the library reads; supply it the way the pipeline does.
-  const claims = parsed.rows.map((r) => ({ ...r, token: r.amount ? TOKEN : '' }))
-  const { rows, missing, rejected, duplicateTxs } = buildAttestations(claims, { map: new Map(), collisions: [] })
+  // No injection: whatever the audit writes is all the backfill gets. Supplying
+  // a missing column here is how a production-only break stays invisible.
+  const { rows, missing, rejected, duplicateTxs } = buildAttestations(parsed.rows, { map: new Map(), collisions: [] })
   assert.equal(missing.length, 0)
   assert.equal(rejected.length, 0)
   assert.equal(duplicateTxs.length, 0)
@@ -193,7 +218,7 @@ await check('a claim the library accepts is a claim the contract accepts', async
   // discovers it at the 74th batch, mid-spend, on mainnet.
   const { chain, addr } = await fresh()
   const shapes = [
-    { rung: 'PaymentVerified', claimsPayment: 'true', txExistsOnCelo: 'true', paymentVerified: 'true', claimTxHash: TX1, amount: '1', decimals: '6' },
+    { rung: 'PaymentVerified', claimsPayment: 'true', txExistsOnCelo: 'true', paymentVerified: 'true', claimTxHash: TX1, amount: '1', decimals: '6', token: TOKEN },
     { rung: 'PaymentTxNotFound', claimsPayment: 'true', claimTxHash: 'not-a-hash' },
     { rung: 'PaymentForeignChain', claimsPayment: 'true', onQueryableChain: 'false', claimNetwork: '8453', claimTxHash: 'not-a-hash' },
     { rung: 'PaymentNoValue', claimsPayment: 'true', txExistsOnCelo: 'true', claimTxHash: TX1, note: 'transfer of zero' },
@@ -201,9 +226,8 @@ await check('a claim the library accepts is a claim the contract accepts', async
     { rung: 'EvidenceUnhashed', evidenceRung: 'Unhashed', hashMatched: 'false' },
     { rung: 'EvidenceUnreachable', evidenceRung: 'Unreachable', fetched: 'false', jsonValid: 'false', hashMatched: 'false' },
   ]
-  const csvText = writeCsv(shapes.map((s, i) => ({ ...s, feedbackIndex: String(i), token: '' })))
-  const claims = parseClaimsCsvStrict(csvText).rows.map((r) => ({ ...r, token: r.amount ? TOKEN : '' }))
-  const { rows, rejected } = buildAttestations(claims, { map: new Map(), collisions: [] })
+  const csvText = writeCsv(shapes.map((sh, i) => ({ ...sh, feedbackIndex: String(i) })))
+  const { rows, rejected } = buildAttestations(parseClaimsCsvStrict(csvText).rows, { map: new Map(), collisions: [] })
   assert.equal(rejected.length, 0, `library rejected: ${rejected.map((r) => r.reason).join('; ')}`)
   assert.equal(rows.length, shapes.length)
 
