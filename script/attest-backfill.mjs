@@ -69,7 +69,7 @@ if (usesJoin) {
   cache = indexCache(readFileSync(CACHE, 'utf8').split('\n').filter(Boolean))
 }
 
-const { rows, missing, rejected, duplicateTxs, cacheCollisions } = buildAttestations(claims, cache)
+const { rows, missing, rejected, skipped, duplicateTxs, cacheCollisions } = buildAttestations(claims, cache)
 
 const byVerdict = {}
 for (const r of rows) {
@@ -112,6 +112,21 @@ if (cacheCollisions.length) {
   }
   if (cacheCollisions.length > 10) console.log(`  … and ${cacheCollisions.length - 10} more`)
   console.log('  Re-export from a current audit: it carries feedbackIndex and needs no join.')
+}
+
+/**
+ * Rows the export says nothing about, reported and not blocking.
+ *
+ * A sampled run leaves most declared files unopened. Those rows carry the
+ * NotChecked rung and nothing is written for them — `None` on chain, which
+ * means "never attested", is the true statement. Printing the count is the
+ * point: an earlier export called them EvidenceInconclusive and the backfill
+ * published a retrieval failure against 8,724 publishers nobody had contacted.
+ */
+if (skipped.length) {
+  console.log(`\nNOT ATTESTED (${skipped.length}) — records this export never opened.`)
+  console.log('  They keep the ledger default None, which is exactly what "never attested"')
+  console.log('  is for. Raise MAX_FILE_FETCHES and re-run the audit to cover them.')
 }
 
 if (rejected.length) {

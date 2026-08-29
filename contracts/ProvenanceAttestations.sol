@@ -836,11 +836,22 @@ contract ProvenanceAttestations {
         return _attestations[key(agentId, clientAddress, feedbackIndex)].payment == Payment.Attributed;
     }
 
-    /// @notice Did the transaction this feedback names actually settle?
+    /// @notice Did the transaction this feedback names settle, without the
+    ///         chain contradicting the document that names it?
     /// @dev    Weaker than it sounds, and deliberately kept: a settled payment
     ///         cited by a review says something happened, not that it happened
     ///         between these two parties. Anyone may name any real transfer. For
     ///         a filter rather than a signal, use {isPaymentAttributed}.
+    ///
+    ///         Weaker, but not unconditional, and the exact line matters.
+    ///         `PartyMismatch` is excluded even though its transaction did
+    ///         settle: there the document says A paid B and the chain says C
+    ///         paid D, so the citation is not merely unproven, it is refuted.
+    ///         A record whose own evidence the chain contradicts must not read
+    ///         as backed by anything. `Failed` and `NoValue` are excluded for
+    ///         the plainer reason that nothing settled. So the question this
+    ///         answers, precisely: the cited transaction exists, succeeded,
+    ///         moved value, and nothing about it contradicts the claim.
     function isPaymentBacked(uint256 agentId, address clientAddress, uint64 feedbackIndex)
         external view returns (bool)
     {

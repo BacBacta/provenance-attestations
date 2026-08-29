@@ -133,7 +133,30 @@ const own = (table, name) =>
     ? table[name]
     : undefined
 
+/**
+ * The rung an export uses for a record it never opened.
+ *
+ * Not a verdict, and deliberately not spelled like one. The fetch cap left
+ * 8,724 of 10,469 declared files unopened and the export called every one of
+ * them `EvidenceInconclusive` — "we tried and learned nothing", a statement
+ * about the record made by a run that had not tried. On chain that is a
+ * retrieval failure published against 8,724 publishers nobody contacted, in a
+ * ledger whose entire claim is that its verdicts were checked.
+ */
+export const NOT_CHECKED = 'NotChecked'
+
+/**
+ * @returns the on-chain verdict for this row, or `null` when the row is not
+ *          something to attest at all.
+ */
 export function verdictOf(row) {
+  /**
+   * Before anything else, including the boolean fallback below — which would
+   * otherwise read `hasURI && !fetched` as EvidenceUnreachable, "a host
+   * answered that the file is gone". That is a worse lie than the first one.
+   */
+  if (row.rung === NOT_CHECKED) return null
+
   const named = own(Verdict, row.rung)
   if (named !== undefined) return named
 
@@ -159,6 +182,7 @@ export function verdictOf(row) {
  * intact" instead of guessing which question the one verdict answered.
  */
 export function evidenceOf(row) {
+  if (row.evidenceRung === NOT_CHECKED) return Evidence.Unknown
   const named = own(Evidence, row.evidenceRung)
   if (named !== undefined) return named
   if (row.fetched === 'true' && row.jsonValid !== 'false') {
@@ -353,6 +377,13 @@ export function buildAttestations(claims, cache) {
   const rows = []
   const missing = []
   const rejected = []
+  /**
+   * Rows the export deliberately says nothing about. Not an error — a sampled
+   * audit must publish which records it skipped — but nothing is written on
+   * chain for them, and the count is reported so "complete" never means "we
+   * quietly attested a third of the registry from a stride we never opened".
+   */
+  const skipped = []
   const seenKeys = new Map()
   const txUsers = new Map()
 
@@ -395,6 +426,10 @@ export function buildAttestations(claims, cache) {
     }
 
     const verdict = verdictOf(c)
+    if (verdict === null) {
+      skipped.push({ row: i + 2, claim: c })
+      continue
+    }
     const payment = paymentOf(c, verdict)
     // `NotDeclared` asserts the document names no payment, so it must carry
     // none — the contract refuses the contradiction and this is where it would
@@ -471,7 +506,7 @@ export function buildAttestations(claims, cache) {
     .map(([tx, users]) => ({ tx, users }))
     .sort((a, b) => b.users.length - a.users.length)
 
-  return { rows, missing, rejected, duplicateTxs, cacheCollisions }
+  return { rows, missing, rejected, skipped, duplicateTxs, cacheCollisions }
 }
 
 /** The contract's own invariants, checked before a batch is ever assembled. */

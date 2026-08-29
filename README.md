@@ -145,7 +145,7 @@ verdict about.
 |---|---|
 | `isPaymentAttributed(...)` | did **this reviewer** pay **this agent**? |
 | `isPaymentAttributedAtLeast(..., min, token)` | …and was it worth at least `min`? |
-| `isPaymentBacked(...)` | did the cited transaction settle at all? (weaker) |
+| `isPaymentBacked(...)` | did it settle, with nothing on chain contradicting it? |
 | `hasIntactEvidence(...)` | did the file resolve and match its attested hash? |
 | `evidenceOf(...)` / `paymentOf(...)` | either dimension on its own |
 | `isWithinSweep(block)` | did the attester claim to have swept this block? |
@@ -163,7 +163,14 @@ calls returns `false` for every address on Celo. Anyone wiring the integration
 in before the backfill lands is filtering out 100% of the registry while
 believing they applied a verified filter.
 
-`isPaymentBacked` is deliberately the weak one. Anyone may cite any real
+`isPaymentBacked` excludes `PaymentPartyMismatch`, though that transaction did
+settle. There the document says A paid B and the chain says C paid D: the
+citation is not merely unproven, it is refuted, and a record the chain
+contradicts must not read as backed by anything. So it answers, precisely: the
+cited transaction exists, succeeded, moved value, and nothing about it
+contradicts the claim.
+
+Even so, `isPaymentBacked` is deliberately the weak one. Anyone may cite any real
 transfer on the chain, so it is a signal, not a filter — use
 `isPaymentAttributed` where a payment is meant to be a barrier to entry. And
 because a verified transfer has no floor, the settled `amount` and its token are

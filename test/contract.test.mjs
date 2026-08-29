@@ -10,7 +10,7 @@
  */
 import assert from 'node:assert/strict'
 import { encodeAbiParameters } from 'viem'
-import { newChain, ERRORS } from './harness.mjs'
+import { newChain, ERRORS, BLOCK_TIMESTAMP } from './harness.mjs'
 
 const OWNER    = '0x00000000000000000000000000000000000000a1'
 const ATTESTER = '0x00000000000000000000000000000000000000a2'
@@ -959,6 +959,85 @@ await check('withdrawing a coverage claim rolls the frontier back with it', asyn
   // …and it can start again afterwards.
   assert.equal((await chain.call(ATTESTER, addr, 'commitSweep', [100n, 400n, 20, 20, ZERO32])).reverted, false)
   assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [350n])).result, true)
+})
+
+await check('the three payment reads, on every payment state there is', async () => {
+  /**
+   * Every call to isPaymentAttributedAtLeast in the suite was aimed at a
+   * record written by the `attributed()` helper, or at one never attested at
+   * all. So the guarantee it exists to give — that a merely *verified*
+   * transfer, which anyone may cite, can never satisfy a threshold filter —
+   * was asserted nowhere. The implementation is right; nothing was holding it
+   * to that.
+   *
+   * A table over all nine payment states, so a tenth cannot be added without
+   * someone deciding what these three answer for it.
+   */
+  const { chain, addr } = await fresh()
+  const OBS = BLOCK_TIMESTAMP - 86_400n
+  const rows = [
+    // [payment, verdict, evidence, carries a tx?, carries an amount?]
+    [P.Unknown,       V.EvidenceIntact,        E.Intact,  false, false],
+    [P.Attributed,    V.PaymentAttributed,     E.Unknown, true,  true ],
+    [P.Verified,      V.PaymentVerified,       E.Unknown, true,  true ],
+    [P.PartyMismatch, V.PaymentPartyMismatch,  E.Unknown, true,  true ],
+    [P.NoValue,       V.PaymentNoValue,        E.Unknown, true,  false],
+    [P.Failed,        V.PaymentTxFailed,       E.Unknown, true,  false],
+    [P.NotFound,      V.PaymentTxNotFound,     E.Unknown, false, false],
+    [P.ForeignChain,  V.PaymentForeignChain,   E.Unknown, false, false],
+    [P.NotDeclared,   V.EvidenceIntact,        E.Intact,  false, false],
+  ]
+
+  for (let i = 0; i < rows.length; i++) {
+    const [payment, verdict, evidence, hasTx, hasAmount] = rows[i]
+    const id = BigInt(i + 1)
+    const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+      agentId: id, feedbackIndex: 0n, verdict, evidence, payment,
+      evidenceHash: evidence === E.Unknown ? ZERO32 : EH1,
+      paymentTx: hasTx ? TX1 : ZERO32,
+      amount: hasAmount ? 1_000_000n : 0n,
+      paymentToken: hasAmount ? TOKEN : ZERO_ADDR,
+      amountDecimals: hasAmount ? 6 : 0,
+      observedAt: Number(OBS),
+    })])
+    assert.equal(r.reverted, false, `state ${payment} was refused: ${r.selector}`)
+
+    const read = async (fn, extra = []) =>
+      (await chain.call(STRANGER, addr, fn, [id, REVIEWER, 0n, ...extra])).result
+
+    // Attribution is exactly one state. Nothing else may satisfy it.
+    assert.equal(await read('isPaymentAttributed'), payment === P.Attributed, `isPaymentAttributed on ${payment}`)
+
+    // The threshold filter is attribution PLUS an amount. A verified transfer
+    // — which anyone may cite, pointing at anybody's payment — must never
+    // pass it, however large the sum beside it.
+    assert.equal(
+      await read('isPaymentAttributedAtLeast', [1n, TOKEN]), payment === P.Attributed,
+      `isPaymentAttributedAtLeast on ${payment}`,
+    )
+    // …and a threshold above what settled fails even for the attributed one.
+    assert.equal(await read('isPaymentAttributedAtLeast', [1_000_001n, TOKEN]), false)
+    // …as does the right amount in the wrong token.
+    assert.equal(await read('isPaymentAttributedAtLeast', [1n, ZERO_ADDR]), false)
+
+    /**
+     * The weak read is broad, but not unconditional. PartyMismatch is excluded
+     * although its transaction DID settle: there the document says A paid B
+     * and the chain says C paid D, so the citation is not unproven, it is
+     * refuted — and a record the chain contradicts must not read as backed by
+     * anything. Failed and NoValue are out for the plainer reason that nothing
+     * settled.
+     */
+    const settles = payment === P.Attributed || payment === P.Verified
+    assert.equal(await read('isPaymentBacked'), settles, `isPaymentBacked on ${payment}`)
+  }
+
+  // And a record nobody ever attested answers false to all three.
+  const never = async (fn, extra = []) =>
+    (await chain.call(STRANGER, addr, fn, [999n, REVIEWER, 0n, ...extra])).result
+  assert.equal(await never('isPaymentAttributed'), false)
+  assert.equal(await never('isPaymentBacked'), false)
+  assert.equal(await never('isPaymentAttributedAtLeast', [0n, ZERO_ADDR]), false)
 })
 
 console.log('\ndeclaring nothing is a finding, not a silence')

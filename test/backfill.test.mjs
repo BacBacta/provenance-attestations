@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs'
 import {
   parseClaimsCsv, parseClaimsCsvStrict, verdictOf, evidenceOf, paymentOf, paymentTxOf,
   indexCache, buildAttestations, incoherence, fingerprint, amountOf, observedAtOf,
-  parseUint, parseAddress, Verdict, Evidence, Payment, chunk, recordKey, merkleRoot,
+  parseUint, parseAddress, Verdict, Evidence, Payment, chunk, recordKey, merkleRoot, NOT_CHECKED,
 } from '../script/backfill-lib.mjs'
 import { escapeCell, parseCsvStrict } from '../script/csv.mjs'
 import { keccak256 } from 'viem'
@@ -341,6 +341,37 @@ check('NotDeclared is only written about bytes that ARE the attested document', 
   )
   // An older export carries no such column, and its absence is not a claim.
   assert.equal(paymentOf({ ...read, hashMatched: 'true' }, doc), Payment.NotDeclared)
+})
+
+check('a record nobody opened is not attested at all', () => {
+  /**
+   * The fetch cap left 8,724 of 10,469 declared files unopened, and the export
+   * gave every one of them rung=EvidenceInconclusive. That rung means "we
+   * tried and learned nothing" — a statement about the record. We had not
+   * tried. Publishing it on chain would put a retrieval failure on 8,724
+   * publishers who were never contacted, and it would do so in a ledger whose
+   * whole claim is that its verdicts were checked.
+   *
+   * The row stays in the export — a sampled audit must say which records it
+   * skipped, not omit them — but it carries a rung that is not a verdict, and
+   * the backfill writes nothing for it. `None` on chain, which means "never
+   * attested", is the true statement.
+   */
+  const skipped = { rung: NOT_CHECKED, evidenceRung: NOT_CHECKED, hasURI: 'true',
+                    fetched: 'false', jsonValid: 'false', hashMatched: 'false', inconclusive: 'false' }
+  assert.equal(verdictOf(skipped), null, 'an unopened record has no verdict')
+
+  // And the boolean fallback must not rescue it into one. Without the explicit
+  // sentinel, `hasURI && !fetched` reads as EvidenceUnreachable — "a host
+  // answered that the file is gone" — which is a worse lie than the first.
+  assert.notEqual(verdictOf(skipped), Verdict.EvidenceUnreachable)
+  assert.notEqual(verdictOf(skipped), Verdict.EvidenceInconclusive)
+
+  const text = csv(HEADER, [row({ rung: NOT_CHECKED, evidenceRung: NOT_CHECKED, fetched: 'false' })])
+  const { rows, skipped: sk, rejected } = buildAttestations(parseClaimsCsvStrict(text).rows, { map: new Map(), collisions: [] })
+  assert.equal(rows.length, 0, 'nothing may be written for a record nobody opened')
+  assert.equal(rejected.length, 0, 'and it is not an error — it is a deliberate skip')
+  assert.equal(sk.length, 1, 'the skip must be counted, not silent')
 })
 
 console.log('\nfield coercion')
