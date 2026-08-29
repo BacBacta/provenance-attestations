@@ -294,6 +294,55 @@ check('a pass with nothing to say about the payment writes Unknown, so the chain
   assert.equal(paymentOf({}, Verdict.PaymentTxNotFound), Payment.NotFound)
 })
 
+check('NotDeclared is only written about bytes that ARE the attested document', () => {
+  /**
+   * `NotDeclared` asserts on chain that the reviewer's document names no
+   * payment, and unlike `Unknown` it OVERWRITES — including over an attributed
+   * payment already published. So it may only be said about bytes that are
+   * cryptographically the document: a 200 whose keccak does not match the
+   * attested feedbackHash is somebody else's file, or today's version of one
+   * that has since changed, and the pipeline knows it — it publishes exactly
+   * that as EvidenceUnhashed in the same row.
+   */
+  const read = { fetched: 'true', jsonValid: 'true', claimsPayment: 'false', claimTxHash: '' }
+  const doc = Verdict.EvidenceIntact
+
+  assert.equal(paymentOf({ ...read, hashMatched: 'true' }, doc), Payment.NotDeclared)
+
+  // Retrieved, parsed — and not the attested document. Silence, not a finding.
+  assert.equal(paymentOf({ ...read, hashMatched: 'false' }, doc), Payment.Unknown,
+    'unbound bytes must not overwrite a published attribution')
+  assert.equal(paymentOf({ ...read }, doc), Payment.Unknown, 'no hashMatched column at all')
+  assert.equal(paymentOf({ ...read, hashMatched: 'true', fetched: 'false' }, doc), Payment.Unknown)
+  assert.equal(paymentOf({ ...read, hashMatched: 'true', jsonValid: 'false' }, doc), Payment.Unknown)
+
+  /**
+   * And never against the row's own evidence. A transaction hash in the row
+   * means the document did declare something the pipeline could see, whatever
+   * `claimsPayment` says about it.
+   */
+  assert.equal(
+    paymentOf({ ...read, hashMatched: 'true', claimTxHash: TX1 }, doc), Payment.Unknown,
+    'a row carrying a transaction hash cannot assert the document declares none',
+  )
+  assert.equal(
+    paymentOf({ ...read, hashMatched: 'true', claimsPayment: 'true' }, doc), Payment.Unknown,
+  )
+
+  /**
+   * And never when the audit says it saw a proof field it could not read.
+   * `proofOfPayment` arrives as a bare hash string and as a list of claims in
+   * the wild; an extractor that understood neither reported "no claim", and
+   * this function published that as the reviewer's own statement.
+   */
+  assert.equal(
+    paymentOf({ ...read, hashMatched: 'true', proofPresent: 'true' }, doc), Payment.Unknown,
+    'our extractor falling short must not become their record',
+  )
+  // An older export carries no such column, and its absence is not a claim.
+  assert.equal(paymentOf({ ...read, hashMatched: 'true' }, doc), Payment.NotDeclared)
+})
+
 console.log('\nfield coercion')
 
 check('a malformed hash becomes the zero payment reference, a valid one is kept', () => {

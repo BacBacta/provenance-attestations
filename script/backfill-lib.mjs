@@ -190,11 +190,43 @@ export function evidenceOf(row) {
 export function paymentOf(row, verdict) {
   const implied = PAYMENT_OF_VERDICT[verdict]
   if (implied !== undefined) return implied
-  const read = row.fetched === 'true' && row.jsonValid === 'true'
-  if (read && row.claimsPayment === 'false' && !(row.claimTxHash ?? '').trim()) {
-    return Payment.NotDeclared
-  }
-  return Payment.Unknown
+
+  /**
+   * `NotDeclared` may only be said about bytes that ARE the document.
+   *
+   * It asserts on chain that the reviewer's file names no payment, and unlike
+   * `Unknown` it OVERWRITES — including over an attributed payment already
+   * published. Deciding it on "fetched and parsed" alone meant a 200 whose
+   * keccak does not match the attested feedbackHash could carry it: somebody
+   * else's file, or today's version of one that has since changed. The
+   * pipeline knows the difference and publishes it in the same row as
+   * EvidenceUnhashed — so requiring the binding costs nothing and is the
+   * whole difference between an observation and an accusation.
+   */
+  const isTheDocument = row.fetched === 'true' && row.jsonValid === 'true' && row.hashMatched === 'true'
+  if (!isTheDocument) return Payment.Unknown
+
+  /**
+   * And never against the row's own evidence. A transaction hash present, or
+   * `claimsPayment` true, means the pipeline saw a claim — whatever else the
+   * row says. Any disagreement between those columns is a reason to stay
+   * silent, not to publish the more damaging reading.
+   */
+  if (row.claimsPayment !== 'false') return Payment.Unknown
+  if ((row.claimTxHash ?? '').trim()) return Payment.Unknown
+
+  /**
+   * And never when the audit says it saw a proof field it could not read.
+   *
+   * `proofOfPayment` arrives as a bare hash string and as a list of claims in
+   * the wild, and an extractor that understood neither reported "no claim" —
+   * which this function then published as the reviewer's own statement that
+   * their document declares no payment. Our shortfall became their permanent
+   * record. Older exports have no such column; their absence reads as false,
+   * which is the pre-existing behaviour and not a new assertion.
+   */
+  if (row.proofPresent === 'true') return Payment.Unknown
+  return Payment.NotDeclared
 }
 
 const WELL_FORMED = /^0x[0-9a-fA-F]{64}$/
