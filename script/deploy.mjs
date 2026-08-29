@@ -24,7 +24,7 @@
  *   transferOwnership(<cold>)   from the hot key
  *   acceptOwnership()           from the cold key
  */
-import { createWalletClient, createPublicClient, http, formatEther } from 'viem'
+import { createWalletClient, createPublicClient, http, formatEther, getContractAddress } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { celo } from 'viem/chains'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
@@ -62,14 +62,67 @@ if (balance === 0n) {
   process.exit(1)
 }
 
+/**
+ * A deployment is decided by the chain, never by the SDK's exception.
+ *
+ * The v3 deployment was broadcast, mined and correct, and this script reported
+ * "Transaction creation failed" and exited non-zero: the node accepted the
+ * transaction and the reply was lost on the way back over a mobile link. An
+ * operator who believes that message redeploys — a second contract, a second
+ * address, a forked ledger, and the first one still live and unrecorded.
+ *
+ * So the address is computed BEFORE sending, from the deployer and its nonce,
+ * which is what CREATE will use. If code is already there, the deployment has
+ * already happened and this run must not repeat it. If the send throws, the
+ * same address decides the outcome instead of the error.
+ */
+const nonce = await pub.getTransactionCount({ address: account.address })
+const expected = getContractAddress({ from: account.address, nonce: BigInt(nonce) })
+console.log(`address   ${expected}  (deterministic: deployer + nonce ${nonce})`)
+
+if (await pub.getBytecode({ address: expected })) {
+  console.error(
+    `\nA contract already exists at ${expected}.\n` +
+    'This deployment has already happened — recording it instead of repeating it.',
+  )
+  process.exit(1)
+}
+
 console.log('\ndeploying…')
-const hash = await wallet.deployContract({ abi, bytecode, args: [attester] })
-console.log(`tx        ${hash}`)
-const receipt = await pub.waitForTransactionReceipt({ hash })
-if (receipt.status !== 'success') {
+let hash = null
+try {
+  hash = await wallet.deployContract({ abi, bytecode, args: [attester] })
+  console.log(`tx        ${hash}`)
+} catch (err) {
+  console.error(`\nThe send reported: ${err.shortMessage ?? err.message}`)
+  console.error('Asking the chain whether it landed anyway…')
+}
+
+/**
+ * Give a broadcast transaction time to appear before believing it did not.
+ * A lost reply and a rejected transaction look identical from here, and only
+ * one of them means there is nothing on chain.
+ */
+let code = null
+for (let i = 0; i < 30 && !code; i++) {
+  if (i) await new Promise((r) => setTimeout(r, 4000))
+  code = await pub.getBytecode({ address: expected }).catch(() => null)
+  if (!code) process.stdout.write(`\r  waiting for code at ${expected}… ${i * 4}s   `)
+}
+process.stdout.write('\n')
+
+if (!code) {
+  console.error(`\nNothing was deployed at ${expected}. Nonce ${nonce} is still free;`)
+  console.error('re-running is safe.')
+  process.exit(1)
+}
+
+const receipt = hash ? await pub.waitForTransactionReceipt({ hash }).catch(() => null) : null
+if (receipt && receipt.status !== 'success') {
   console.error('Deployment reverted.')
   process.exit(1)
 }
+if (!hash) console.log('Recovered: the transaction had landed. No second deployment was made.')
 
 mkdirSync('deployments', { recursive: true })
 
@@ -92,25 +145,35 @@ if (existsSync('deployments/celo.json')) {
 
 let version = null
 try {
-  version = await pub.readContract({ address: receipt.contractAddress, abi, functionName: 'VERSION' })
+  version = await pub.readContract({ address: expected, abi, functionName: 'VERSION' })
 } catch { /* a contract without VERSION() predates it */ }
+
+// Read back what was actually deployed rather than what was intended.
+const onChainOwner = await pub.readContract({ address: expected, abi, functionName: 'owner' })
+const onChainAttester = await pub.readContract({ address: expected, abi, functionName: 'attester' })
 
 const record = {
   contract: 'ProvenanceAttestations',
   version,
-  address: receipt.contractAddress,
+  address: expected,
   deployer: account.address,
-  attester,
+  owner: onChainOwner,
+  attester: onChainAttester,
   txHash: hash,
-  block: receipt.blockNumber.toString(),
+  block: receipt ? receipt.blockNumber.toString() : null,
   chainId: celo.id,
   deployedAt: new Date().toISOString(),
 }
 writeFileSync('deployments/celo.json', JSON.stringify(record, null, 2))
 
-console.log(`\ndeployed  ${receipt.contractAddress}`)
-console.log(`block     ${receipt.blockNumber}`)
-console.log(`explorer  https://celo.blockscout.com/address/${receipt.contractAddress}`)
+console.log(`\ndeployed  ${expected}`)
+if (receipt) console.log(`block     ${receipt.blockNumber}`)
+console.log(`owner     ${onChainOwner}`)
+console.log(`attester  ${onChainAttester}`)
+if (String(onChainOwner).toLowerCase() === String(onChainAttester).toLowerCase()) {
+  console.log('  ! owner and attester are the same key — see the note above.')
+}
+console.log(`explorer  https://celo.blockscout.com/address/${expected}`)
 console.log('\nNext: verify the source on the explorer (Contract → Verify & publish →')
 console.log('Standard JSON input → upload out/standard-input.json, compiler v0.8.28).')
 if (attester.toLowerCase() === account.address.toLowerCase()) {

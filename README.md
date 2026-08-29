@@ -175,6 +175,18 @@ Or by hand: Contract → Verify & publish → Standard JSON input → upload
 `out/standard-input.json` (compiler v0.8.28). The bytecode targets `paris`, so
 it runs identically on any EVM chain.
 
+### Deployed
+
+| | |
+|---|---|
+| **v3** | [`0xAD6202F6…6807`](https://celo.blockscout.com/address/0xAD6202F635e97f17f193524CCa66B5D288ab6807) — block 76,082,999, empty until backfilled |
+| owner | `0x6141C737…C4ef` — cold, its only power is rotating the attester |
+| attester | `0xC2Dc6B28…972A` — signs verdicts, and nothing else |
+| **v2** | [`0x3ed53c9b…01ab`](https://celo.blockscout.com/address/0x3ed53c9bf7f7b5026eae83e4d62abdbd748a01ab) — still live, holds the 20,097 verdicts, one key for both roles |
+
+The key split the counter-analysis asked for is in the creation transaction
+itself, not a later handover.
+
 ### Deploying v3 over a live v2
 
 v3 is a **new contract at a new address**. The 20,097 verdicts stay on
