@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs'
 import { newChain, ERRORS } from './harness.mjs'
 import { escapeCell } from '../script/csv.mjs'
 import {
-  parseClaimsCsvStrict, buildAttestations, toClaimStruct, chunk, fingerprint, Verdict, Payment,
+  parseClaimsCsvStrict, buildAttestations, toClaimStruct, chunk, fingerprint, Verdict, Payment, incoherence,
 } from '../script/backfill-lib.mjs'
 
 const OWNER    = '0x00000000000000000000000000000000000000a1'
@@ -253,6 +253,65 @@ await check('a claim the library accepts is a claim the contract accepts', async
   assert.equal(r.logs.filter((l) => l.eventName === 'FeedbackAttested').length, shapes.length)
 })
 
+await check('both sides of the invariant agree, on every combination there is', async () => {
+  /**
+   * incoherence() is documented as "the contract's own invariants, checked
+   * before a batch is ever assembled". It was an approximation of them. An
+   * enumeration against a real EVM found 253 combinations the contract rejects
+   * and the library accepted — every one a whole batch reverted mid-spend,
+   * after its gas was paid, at whatever row it happened to fall on.
+   *
+   * So the enumeration IS the test. 14 verdicts x 7 evidence states x 9
+   * payment states, each under four payloads, both sides asked, every
+   * disagreement reported. Neither can drift from the other again without
+   * this failing.
+   */
+  const { chain, addr } = await fresh()
+  const ZERO32 = '0x' + '00'.repeat(32)
+  const ZERO_ADDR = '0x' + '00'.repeat(20)
+  const HASH = '0x' + 'aa'.repeat(32)
+  const OBS = 1_789_000_000
+
+  const payloads = [
+    { name: 'bare',        paymentTx: ZERO32, amount: 0n, paymentToken: ZERO_ADDR, evidenceHash: HASH,   observedAt: OBS },
+    { name: 'tx',          paymentTx: TX1,    amount: 0n, paymentToken: ZERO_ADDR, evidenceHash: HASH,   observedAt: OBS },
+    { name: 'tx+amount',   paymentTx: TX1,    amount: 1_000_000n, paymentToken: TOKEN, evidenceHash: HASH, observedAt: OBS },
+    { name: 'no hash',     paymentTx: ZERO32, amount: 0n, paymentToken: ZERO_ADDR, evidenceHash: ZERO32, observedAt: OBS },
+    { name: 'no date',     paymentTx: ZERO32, amount: 0n, paymentToken: ZERO_ADDR, evidenceHash: HASH,   observedAt: 0 },
+  ]
+
+  let id = 0
+  const divergences = []
+  for (let verdict = 1; verdict <= 13; verdict++) {
+    for (let evidence = 0; evidence <= 6; evidence++) {
+      for (let payment = 0; payment <= 8; payment++) {
+        for (const pl of payloads) {
+          id++
+          const shape = { verdict, evidence, payment, paymentTx: pl.paymentTx, amount: pl.amount,
+                          paymentToken: pl.paymentToken, evidenceHash: pl.evidenceHash, observedAt: pl.observedAt }
+          const libraryRefuses = incoherence(shape) !== null
+          const r = await chain.call(ATTESTER, addr, 'attest', [{
+            agentId: BigInt(id), clientAddress: REVIEWER, feedbackIndex: BigInt(id),
+            verdict, evidence, payment,
+            paymentTx: pl.paymentTx, evidenceHash: pl.evidenceHash,
+            amount: pl.amount, paymentToken: pl.paymentToken, amountDecimals: pl.amount > 0n ? 6 : 0,
+            observedAt: pl.observedAt,
+          }])
+          if (r.reverted !== libraryRefuses) {
+            divergences.push(
+              `V${verdict} E${evidence} P${payment} [${pl.name}]: ` +
+              `contract ${r.reverted ? 'REFUSES (' + r.selector + ')' : 'accepts'}, ` +
+              `library ${libraryRefuses ? 'refuses' : 'ACCEPTS'}`,
+            )
+          }
+        }
+      }
+    }
+  }
+  assert.deepEqual(divergences.slice(0, 12), [], `${divergences.length} of ${id} combinations disagree`)
+  assert.ok(id >= 3_000, `only ${id} combinations were exercised`)
+})
+
 await check('a library-rejected claim is one the contract would have refused too', async () => {
   const { chain, addr } = await fresh()
   // PaymentVerified with an unparseable hash: the library refuses it, and the
@@ -267,7 +326,7 @@ await check('a library-rejected claim is one the contract would have refused too
     agentId: 1n, clientAddress: REVIEWER, feedbackIndex: 0n,
     verdict: Verdict.PaymentVerified, evidence: 1, payment: 2,
     paymentTx: '0x' + '00'.repeat(32), evidenceHash: '0x' + 'aa'.repeat(32),
-    amount: 0n, paymentToken: '0x' + '00'.repeat(20), amountDecimals: 0, observedAt: 0,
+    amount: 0n, paymentToken: '0x' + '00'.repeat(20), amountDecimals: 0, observedAt: 1_789_000_000,
   }])
   assert.equal(r.selector, ERRORS.MissingPaymentTx)
 })
@@ -285,7 +344,7 @@ await check('a resume marker written at one batch size cannot be misread at anot
     agentId: 1n, clientAddress: REVIEWER, feedbackIndex: BigInt(i),
     verdict: Verdict.EvidenceIntact, evidence: 1, payment: 0,
     paymentTx: '0x' + '00'.repeat(32), evidenceHash: '0x' + 'aa'.repeat(32),
-    amount: 0n, paymentToken: '0x' + '00'.repeat(20), amountDecimals: 0, observedAt: 0,
+    amount: 0n, paymentToken: '0x' + '00'.repeat(20), amountDecimals: 0, observedAt: 1_789_000_000,
   }))
 
   // Progress is rows, so re-cutting at a different size resumes at the same place.

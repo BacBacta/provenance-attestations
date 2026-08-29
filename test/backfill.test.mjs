@@ -49,7 +49,7 @@ const row = (over = {}) => ({
   inconclusive: 'false', claimsPayment: 'false', txExistsOnCelo: 'false',
   paymentVerified: 'false', paymentAttributed: 'false', partiesContradicted: 'false',
   onQueryableChain: 'true', claimTxHash: '', claimNetwork: '', amount: '', symbol: '',
-  decimals: '', token: '', evidenceHash: '0x' + 'aa'.repeat(32), observedAt: '',
+  decimals: '', token: '', evidenceHash: '0x' + 'aa'.repeat(32), observedAt: '2026-08-20T09:00:00Z',
   note: '', feedbackURI: 'https://x.example/a.json', ...over,
 })
 

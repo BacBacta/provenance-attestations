@@ -150,8 +150,14 @@ contract ProvenanceAttestations {
          * payments that do not exist on this chain, which is the exact
          * population this ledger was built to name.
          *
-         * It is a finding, not an absence, so it is NOT sticky: it overwrites,
-         * and it is only writable by a pass that actually read the document.
+         * It is a finding, not an absence, so it is NOT sticky: it overwrites.
+         *
+         * That it is written only by a pass that actually read the document is
+         * a rule of the PIPELINE, not of this contract, and saying otherwise
+         * here would be claiming a guarantee nothing enforces. What the
+         * contract can check, it does: the value may not arrive carrying the
+         * payment it denies, and it may not sit under a headline that names a
+         * payment outcome.
          */
         NotDeclared
     }
@@ -400,6 +406,10 @@ contract ProvenanceAttestations {
     error IncoherentAmount();
     /// @dev An observation timestamped after the block that records it.
     error ObservationInFuture();
+    /// @dev A stated dimension with no observation date behind it.
+    error ObservationMissing();
+    /// @dev `Evidence.Intact` claims a match against a hash that is not there.
+    error MissingEvidenceHash();
     /// @dev A sweep whose range is empty, inverted, or not yet mined.
     error InvalidRange();
     /// @dev More records attested than were observed: the claim refutes itself.
@@ -495,8 +505,9 @@ contract ProvenanceAttestations {
             // entry attested no hash at all — the basis of EvidenceUnbound.
             a.evidenceHash = c.evidenceHash;
             // The date travels with the dimension it describes, and only with
-            // it: 0 still means "not stated", so it never overwrites a date.
-            if (c.observedAt != 0) a.evidenceObservedAt = c.observedAt;
+            // it. `_validate` has already refused a stated dimension with no
+            // date, so this cannot blank one that was set.
+            a.evidenceObservedAt = c.observedAt;
         }
         if (c.payment != Payment.Unknown) {
             a.payment = c.payment;
@@ -504,7 +515,7 @@ contract ProvenanceAttestations {
             a.paymentToken = c.paymentToken;
             a.amountDecimals = c.amountDecimals;
             a.paymentTx = c.paymentTx;
-            if (c.observedAt != 0) a.paymentObservedAt = c.observedAt;
+            a.paymentObservedAt = c.observedAt;
         }
         // The write itself, which is a liveness signal and nothing more: it
         // says the service touched this record, never that it re-checked what
@@ -594,6 +605,31 @@ contract ProvenanceAttestations {
         // exactly the case where there is no well-formed hash to carry.
         if (_assertsTxExists(c.verdict) || _assertsTxExists(c.payment)) {
             if (c.paymentTx == bytes32(0)) revert MissingPaymentTx();
+        }
+
+        /**
+         * `Intact` means the file resolved AND matched its attested hash. With
+         * no hash stored there is nothing it can have matched — that state is
+         * `Unbound`, and the contract defines both terms four lines apart.
+         * Without this, hasIntactEvidence answered true for a record whose
+         * evidenceHash is zero: the strongest documentary claim in the system,
+         * reachable with nothing binding the bytes to the registry entry.
+         */
+        if (c.evidence == Evidence.Intact && c.evidenceHash == bytes32(0)) revert MissingEvidenceHash();
+        if (c.verdict == Verdict.EvidenceIntact && c.evidenceHash == bytes32(0)) revert MissingEvidenceHash();
+
+        /**
+         * A dimension that is stated must say when it was looked at.
+         *
+         * `observedAt == 0` is documented as "not stated", and the merge relies
+         * on that to avoid overwriting a real date with a blank. But a claim
+         * could state a dimension AND leave the date at zero, and then the
+         * stored date still described the state that verdict had just replaced
+         * — a fresh finding wearing the previous one's timestamp, which is the
+         * exact confusion the per-dimension dates were added to end.
+         */
+        if ((c.evidence != Evidence.Unknown || c.payment != Payment.Unknown) && c.observedAt == 0) {
+            revert ObservationMissing();
         }
 
         // An attribution with no value is a contradiction: attribution is about

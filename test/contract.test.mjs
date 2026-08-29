@@ -49,7 +49,10 @@ function claim(over = {}) {
     amount: 0n,
     paymentToken: ZERO_ADDR,
     amountDecimals: 0,
-    observedAt: 0,
+    // A stated dimension must say when it was looked at, so the default claim
+    // carries a real observation date. Tests that care about the date override
+    // it; tests that do not would otherwise all fail on ObservationMissing.
+    observedAt: Number(BLOCK_TIMESTAMP - 86_400n),
     ...over,
   }
 }
@@ -272,7 +275,7 @@ await check('a pass that did not look at the file leaves the file alone', async 
   await chain.call(ATTESTER, addr, 'attest', [claim({
     verdict: V.PaymentAttributed, payment: P.Attributed, evidence: E.Unknown,
     paymentTx: TX1, amount: 1_000_000n, paymentToken: TOKEN, amountDecimals: 6,
-    evidenceHash: ZERO32, observedAt: 0,
+    evidenceHash: ZERO32, observedAt: 1_789_100_000,
   })])
   const a = (await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result
   assert.equal(a.evidence, E.Intact, 'the documentary state survived')
@@ -312,7 +315,7 @@ await check('the event reports the stored state on both dimensions', async () =>
   const r = await chain.call(ATTESTER, addr, 'attest', [claim({
     verdict: V.PaymentAttributed, payment: P.Attributed, evidence: E.Unknown,
     paymentTx: TX1, amount: 1_000_000n, paymentToken: TOKEN, amountDecimals: 6,
-    evidenceHash: ZERO32, observedAt: 0,
+    evidenceHash: ZERO32, observedAt: 1_789_100_000,
   })])
   const a = only(r.logs, 'FeedbackAttested')
   assert.equal(a.evidence, E.Intact)

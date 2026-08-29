@@ -82,6 +82,18 @@ const ASSERTS_TX_EXISTS = new Set([
 ])
 
 /**
+ * The same rule read off the PAYMENT dimension.
+ *
+ * `_validate` overloads `_assertsTxExists` for both enums; this side checked
+ * only the headline, so a documentary verdict carrying `payment: Verified`
+ * with a zero hash passed here and reverted the batch on chain.
+ */
+const PAYMENT_ASSERTS_TX = new Set([
+  Payment.Verified, Payment.Attributed, Payment.PartyMismatch,
+  Payment.Failed, Payment.NoValue,
+])
+
+/**
  * Which documentary state each headline rung implies.
  *
  * The contract enforces this, so a claim that breaks it reverts the whole batch
@@ -447,7 +459,14 @@ export function buildAttestations(claims, cache) {
      * found could be paired with a zero hash.
      */
     const evidence = evidenceOf(c)
-    const problem = incoherence({ verdict, evidence, payment, paymentTx, amount, paymentToken })
+    // Exactly the values that go into the claim below, so the mirror checks
+    // what will actually be sent rather than something adjacent to it.
+    const finalHash = evidenceHash ?? ZERO32
+    const finalObservedAt = observedAtOf(c)
+    const problem = incoherence({
+      verdict, evidence, payment, paymentTx, amount, paymentToken,
+      evidenceHash: finalHash, observedAt: finalObservedAt,
+    })
     if (problem) {
       rejected.push({ row: i + 2, reason: problem, claim: c })
       continue
@@ -461,11 +480,11 @@ export function buildAttestations(claims, cache) {
       evidence,
       payment,
       paymentTx,
-      evidenceHash: evidenceHash ?? ZERO32,
+      evidenceHash: finalHash,
       amount: amount > 0n && paymentToken !== ZERO_ADDRESS ? amount : 0n,
       paymentToken: amount > 0n && paymentToken !== ZERO_ADDRESS ? paymentToken : ZERO_ADDRESS,
       amountDecimals: Number.isInteger(decimals) && decimals >= 0 && decimals < 256 ? decimals : 0,
-      observedAt: observedAtOf(c),
+      observedAt: finalObservedAt,
     }
 
     /**
@@ -510,9 +529,25 @@ export function buildAttestations(claims, cache) {
 }
 
 /** The contract's own invariants, checked before a batch is ever assembled. */
-export function incoherence({ verdict, evidence, payment, paymentTx, amount, paymentToken }) {
+/**
+ * The contract's own invariants, checked before a batch is ever assembled.
+ *
+ * This must be a MIRROR of `_validate`, not an approximation of it. It was an
+ * approximation: an enumeration of Verdict x Evidence x Payment against a real
+ * EVM found 253 combinations the contract rejects and this function accepted,
+ * every one of which would have reverted an entire batch mid-spend, after the
+ * gas for it was already paid. The test `both sides of the invariant agree, on
+ * every combination there is` now runs that enumeration on every commit, so
+ * the two can no longer drift.
+ *
+ * @returns a reason string when the contract would refuse this claim, else null
+ */
+export function incoherence({
+  verdict, evidence, payment, paymentTx, amount, paymentToken, evidenceHash, observedAt,
+}) {
   if (verdict === Verdict.None) return 'verdict None can never be written'
 
+  // Both cross-dimension rules, in both directions.
   const impliedPayment = PAYMENT_OF_VERDICT[verdict]
   if (impliedPayment !== undefined && payment !== undefined && payment !== impliedPayment) {
     return `${VERDICT_NAMES[verdict]} implies payment state ${impliedPayment}, not ${payment}`
@@ -521,20 +556,49 @@ export function incoherence({ verdict, evidence, payment, paymentTx, amount, pay
   if (impliedEvidence !== undefined && evidence !== undefined && evidence !== impliedEvidence) {
     return `${VERDICT_NAMES[verdict]} implies evidence state ${impliedEvidence}, not ${evidence}`
   }
-  if (ASSERTS_TX_EXISTS.has(verdict) && paymentTx === ZERO32) {
-    return `${VERDICT_NAMES[verdict]} asserts the transaction was found but carries no hash`
+
+  // A state asserting the transaction was found must name it — from EITHER
+  // dimension. Guarding only the headline left the payment field unchecked,
+  // and isPaymentBacked reads the payment field.
+  if ((ASSERTS_TX_EXISTS.has(verdict) || PAYMENT_ASSERTS_TX.has(payment)) && paymentTx === ZERO32) {
+    return `${VERDICT_NAMES[verdict]}/payment ${payment} asserts the transaction was found but carries no hash`
   }
-  if (verdict === Verdict.PaymentAttributed && amount === 0n) {
+
+  // Attribution is about who moved money, so nothing moved means nothing to
+  // attribute — again from either dimension.
+  if ((verdict === Verdict.PaymentAttributed || payment === Payment.Attributed) && amount === 0n) {
     return 'PaymentAttributed with no amount: attribution is about who moved money'
   }
-  if (amount > 0n && paymentToken === ZERO_ADDRESS) {
+  // …and the mirror: a rung saying nothing relevant moved cannot carry a sum.
+  if (amount !== 0n && (
+    verdict === Verdict.PaymentNoValue ||
+    verdict === Verdict.PaymentTxNotFound ||
+    verdict === Verdict.PaymentForeignChain
+  )) {
+    return `${VERDICT_NAMES[verdict]} says nothing settled, so it cannot carry an amount`
+  }
+  if (amount !== 0n && paymentToken === ZERO_ADDRESS) {
     return 'an amount denominated in no token cannot be compared to a threshold'
   }
-  // The contract's mirror: a claim that the document names no payment cannot
-  // itself arrive carrying one.
+  if (amount === 0n && paymentToken !== ZERO_ADDRESS) {
+    return 'a token with no amount is the same incoherence the other way up'
+  }
+  // A claim that the document names no payment cannot itself carry one.
   if (payment === Payment.NotDeclared &&
       (paymentTx !== ZERO32 || amount !== 0n || paymentToken !== ZERO_ADDRESS)) {
     return 'NotDeclared carries a payment: the row contradicts itself'
+  }
+  // `Intact` means the bytes matched an attested hash. With no hash there is
+  // nothing they can have matched — that state is Unbound.
+  if ((evidence === Evidence.Intact || verdict === Verdict.EvidenceIntact) &&
+      (evidenceHash === undefined || evidenceHash === ZERO32)) {
+    return 'EvidenceIntact claims a match against a hash that is not there'
+  }
+  // A dimension that is stated must say when it was looked at.
+  if (observedAt !== undefined && observedAt === 0 &&
+      ((evidence !== undefined && evidence !== Evidence.Unknown) ||
+       (payment !== undefined && payment !== Payment.Unknown))) {
+    return 'a stated dimension with no observation date behind it'
   }
   return null
 }
