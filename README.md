@@ -105,18 +105,35 @@ The contract cannot verify a sweep — it cannot read the registry's history, an
 pretending to check would be theatre. What it does enforce is that a sweep
 cannot contradict itself or the record: `toBlock` must be mined, `attested` may
 not exceed `observed`, and `attested` may not exceed `totalAttestations`, the
-one quantity this contract measures for itself. Ranges must strictly advance,
-which keeps membership a binary search: **7,960 gas at a thousand sweeps, 8,697
-at two thousand.** A linear scan cost 2,543 + 2,753 per sweep, so eleven
-thousand junk entries — about five dollars — bricked the one read that
-incriminates the attester, permanently, in a contract with no purge and no
-proxy. Honest operation reached the same wall in fifteen months.
+one quantity this contract measures for itself.
 
-Because ranges are ordered, a sweep committed with wrong numbers can never be
-re-committed. `retractSweep(index)` is the only correction, and it **marks
-rather than deletes**: the entry, its original numbers and its date stay
-readable through `sweepAt`, with `SweepRetracted` beside them. A claim withdrawn
-is not a claim unmade, and the record of having made it is the point.
+**Coverage is one contiguous frontier, and that is what makes the read cheap.**
+A new sweep must push `toBlock` further on and must not start beyond the
+frontier, so there are no holes for a record to fall into unnoticed. Re-sweeping
+ground already covered is the normal case — a full-history census does it every
+pass — so overlap is allowed; reaching back *before* where coverage began is
+not, because that moves the floor under every answer already given.
+`isWithinSweep` is then two loads: **860 gas, flat, at any history length**.
+
+That number is the whole point. A linear scan cost 2,543 + 2,753 per sweep, so
+eleven thousand junk entries — about five dollars — bricked the one read that
+incriminates the attester, permanently, in a contract with no purge and no
+proxy; honest operation hit the same wall in fifteen months. The first fix,
+strictly ordered disjoint ranges with a binary search, cost 7,960 gas at 1,024
+sweeps and was **worse than the disease**: the census sweeps from the registry's
+deployment block every pass, so the second run paid for its entire backfill and
+then reverted on the one call it exists to make. The coverage layer could
+publish exactly once.
+
+`retractSweep(index)` withdraws a claim, newest first: withdrawing one that
+later claims have superseded would change nothing while looking as though it
+did, so only the newest standing claim can go, and each withdrawal rolls the
+frontier back to where the claim before it left off. It **marks rather than
+deletes** — the entry, its original numbers and its date stay readable through
+`sweepAt`, with `SweepRetracted` beside them. A claim withdrawn is not a claim
+unmade, and the record of having made it is the point. Withdraw them all and the
+service reads as never having stated its coverage, not as having covered
+nothing.
 
 This does not prevent censorship. It converts it from invisible into
 falsifiable — the same standard this service applies to everyone it publishes a
@@ -132,6 +149,7 @@ verdict about.
 | `hasIntactEvidence(...)` | did the file resolve and match its attested hash? |
 | `evidenceOf(...)` / `paymentOf(...)` | either dimension on its own |
 | `isWithinSweep(block)` | did the attester claim to have swept this block? |
+| `coverage()` | the covered span, and how many standing claims make it up |
 | `sweepCount()` / `sweepAt(i)` / `latestSweep()` | the coverage claims themselves |
 
 **`false` is not a verdict.** Every boolean above returns `false` for a record
@@ -203,14 +221,15 @@ npm install
 npm test        # compiles, then runs the suite on a real in-process EVM
 ```
 
-No framework: `solc` compiles, `@ethereumjs/vm` executes. 105 tests across
+No framework: `solc` compiles, `@ethereumjs/vm` executes. 109 tests across
 three suites:
 
 - **contract** — authorization, the two-step handover, overwrite semantics, the
   sticky payment dimension, event contents, batching, the payload invariants,
   the unforgeability of the "never attested" state, and the coverage surface:
-  ordering, retraction, the bound on `attested`, and a gas measurement at 1,024
-  sweeps that fails if the membership lookup ever stops being logarithmic.
+  the frontier rules, retraction rolling it back, the bound on `attested`, and
+  a gas measurement at 1,024 sweeps that fails if the lookup ever gets more
+  expensive than it is at one.
 - **backfill** — the CSV format as a contract with the audit, the join defect
   that used to leave records unattested, rows that must never reach the chain,
   and resume across a changed batch size.
@@ -218,13 +237,19 @@ three suites:
   a real EVM, including a hostile `feedbackURI` that tries to forge an
   attestation at every layer.
 
-Measured on the harness: a 100-row batch of documentary verdicts costs 6.16M
-gas (~62k per attestation, up from ~51k in v2 — the extra slot carries the
-settled amount, its token and a separate observation date per dimension). A row
-carrying an attributed payment costs ~109k, because it writes a transaction
-hash, a full amount/token slot and the second event as well. `commitSweep` is
-~71k, and `isWithinSweep` 7,960 gas at a thousand sweeps. The full historical
-backfill still fits in a few transactions for cents.
+Measured on the harness, not estimated: a 100-row batch of documentary verdicts
+costs 6.12M gas (61,235 per attestation, up from ~51k in v2 — the extra slot
+carries the settled amount, its token and a separate observation date per
+dimension). A row carrying an attributed payment costs ~109k, because it writes
+a transaction hash, a full amount/token slot and the second event as well.
+`commitSweep` is 115,020 gas the first time and 58,250 after that;
+`isWithinSweep` is 860 gas and does not move with history — measured identical
+at 1, 64 and 1,024 sweeps.
+
+The full historical backfill is ~20,100 rows: **1.23 billion gas, at least 42
+transactions** at a 30M block limit. At 25 gwei that is roughly 31 CELO — tens
+of dollars, not cents. An earlier draft of this file said "a few transactions
+for cents"; it was wrong by three orders of magnitude and is corrected here.
 
 The sources of **every deployment that is still on chain** are frozen under
 `contracts/deployed/`, and a test rebuilds each one, so an address stays

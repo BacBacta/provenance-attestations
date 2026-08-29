@@ -270,9 +270,32 @@ contract ProvenanceAttestations {
     ///         `paymentObservedAt`, which only a pass that looked can move.
     uint256 public totalAttestations;
 
-    /// @notice Every coverage claim ever published, oldest first. Append-only:
-    ///         a sweep cannot be withdrawn, only followed by another.
+    /// @notice Every coverage claim ever published, oldest first. The array is
+    ///         the audit trail — each claim's own numbers, root and date, kept
+    ///         even after withdrawal.
     Sweep[] private _sweeps;
+
+    /**
+     * What is covered, as one contiguous frontier.
+     *
+     * The array answers "what did the attester claim, and when". These three
+     * answer "is this block covered", which is the question that incriminates
+     * the attester, and they answer it in two SLOADs no matter how long the
+     * history gets. A linear scan over the array was brickable for about five
+     * dollars; a binary search fixed the cost but needed strictly advancing,
+     * disjoint ranges — and the census sweeps from the registry's deployment
+     * block EVERY time, so the second run could never commit at all.
+     *
+     * Coverage is therefore a single interval that only grows. A new sweep
+     * must advance `_coveredTo` and must not open a gap behind it, which also
+     * makes "inside a swept range" mean what it says: there are no holes for a
+     * record to fall into unnoticed. `_liveSweeps` is zero when every claim
+     * has been withdrawn, which reads as never having stated coverage rather
+     * than as having covered nothing.
+     */
+    uint64 private _coveredFrom;
+    uint64 private _coveredTo;
+    uint256 private _liveSweeps;
 
     /// @notice Contract revision, for consumers that read across deployments.
     string public constant VERSION = "4.0.0";
@@ -385,6 +408,10 @@ contract ProvenanceAttestations {
     error AttestedExceedsWrites();
     /// @dev No sweep at that index, or it is already withdrawn.
     error NoSuchSweep();
+    /// @dev A sweep starting past the frontier would leave blocks nobody claimed.
+    error CoverageGap();
+    /// @dev Only the newest standing coverage claim can be withdrawn.
+    error NotLatestSweep();
     /// @dev The headline verdict and the payment dimension name different outcomes.
     error DimensionMismatch();
 
@@ -667,18 +694,27 @@ contract ProvenanceAttestations {
         if (attested > observed) revert AttestedExceedsObserved();
 
         /**
-         * Ranges must advance and never overlap.
+         * The frontier must advance, and must not leave a hole behind it.
          *
-         * Without ordering the array is an unordered pile, so asking "was this
-         * block swept" means walking all of it — and the attester alone decides
-         * how long it gets. Eleven thousand junk sweeps cost about five dollars
-         * and pushed that walk past the block gas limit permanently, in a
-         * contract with no purge and no proxy: the attester could brick the one
-         * read that incriminates it, for the price of a coffee. Honest
-         * operation reached the same wall in fifteen months.
+         * Re-sweeping ground already covered is the normal case — a
+         * full-history census does it on every pass — so overlap is allowed.
+         * What is not allowed is a claim that adds nothing (`toBlock` no
+         * further on than the frontier), one that starts beyond it and leaves
+         * blocks nobody claimed in between, or one that reaches back before
+         * where coverage began. That last is a different claim than "I swept
+         * further"; making it silently would move the floor of every answer
+         * this contract has already given.
          */
-        uint256 n = _sweeps.length;
-        if (n != 0 && fromBlock <= _sweeps[n - 1].toBlock) revert InvalidRange();
+        if (_liveSweeps != 0) {
+            if (toBlock <= _coveredTo) revert InvalidRange();
+            if (fromBlock > _coveredTo + 1) revert CoverageGap();
+            if (fromBlock < _coveredFrom) revert InvalidRange();
+            _coveredTo = toBlock;
+        } else {
+            _coveredFrom = fromBlock;
+            _coveredTo = toBlock;
+        }
+        unchecked { _liveSweeps += 1; }
 
         /**
          * A coverage claim cannot exceed what this contract has actually
@@ -709,7 +745,19 @@ contract ProvenanceAttestations {
     ///         counting the range, because a withdrawn claim covers nothing.
     function retractSweep(uint256 index) external onlyAttester {
         if (index >= _sweeps.length || _sweeps[index].retracted) revert NoSuchSweep();
+        /**
+         * Only the newest standing claim, because coverage is a frontier.
+         *
+         * Withdrawing one that later claims have already superseded would
+         * change nothing about what is covered while looking as though it did.
+         * Withdraw them in order, newest first, and each withdrawal rolls the
+         * frontier back to where the claim before it left off.
+         */
+        if (index != _liveSweeps - 1) revert NotLatestSweep();
         _sweeps[index].retracted = true;
+        unchecked { _liveSweeps -= 1; }
+        _coveredTo = _liveSweeps == 0 ? 0 : _sweeps[_liveSweeps - 1].toBlock;
+        if (_liveSweeps == 0) _coveredFrom = 0;
         emit SweepRetracted(index, _sweeps[index].fromBlock, _sweeps[index].toBlock);
     }
 
@@ -746,21 +794,20 @@ contract ProvenanceAttestations {
     ///         inside a swept range is the attester saying nothing about a
     ///         record it says it looked at.
     function isWithinSweep(uint64 blockNumber) external view returns (bool) {
-        // Binary search, which {commitSweep}'s ordering invariant makes valid.
-        // A linear scan was callable by nobody once the array grew, and the
-        // array is grown by the one party this function holds to account.
-        uint256 lo = 0;
-        uint256 hi = _sweeps.length;
-        while (lo < hi) {
-            uint256 mid = (lo + hi) >> 1;
-            Sweep storage sw = _sweeps[mid];
-            if (blockNumber < sw.fromBlock) hi = mid;
-            else if (blockNumber > sw.toBlock) lo = mid + 1;
-            // Found the range that contains it. A withdrawn claim covers
-            // nothing, so the answer is the claim's standing, not its presence.
-            else return !sw.retracted;
-        }
-        return false;
+        // Two SLOADs, whatever the history. Coverage is one interval by
+        // construction (see the state), so there is nothing to search: the
+        // read that holds the attester to account cannot be made expensive by
+        // the attester.
+        if (_liveSweeps == 0) return false;
+        return blockNumber >= _coveredFrom && blockNumber <= _coveredTo;
+    }
+
+    /// @notice The contiguous span of blocks the attester currently claims to
+    ///         have swept, and how many standing claims make it up.
+    /// @dev    Zero live claims means coverage was never stated, or every
+    ///         statement has been withdrawn — never that nothing was covered.
+    function coverage() external view returns (uint64 from, uint64 to, uint256 liveClaims) {
+        return (_coveredFrom, _coveredTo, _liveSweeps);
     }
 
     /// @notice Canonical storage key, mirroring the ERC-8004 registry's tuple.

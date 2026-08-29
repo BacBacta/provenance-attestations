@@ -101,6 +101,8 @@ export const ERRORS = {
   IncoherentAmount: toFunctionSelector('IncoherentAmount()'),
   ObservationInFuture: toFunctionSelector('ObservationInFuture()'),
   InvalidRange: toFunctionSelector('InvalidRange()'),
+  CoverageGap: toFunctionSelector('CoverageGap()'),
+  NotLatestSweep: toFunctionSelector('NotLatestSweep()'),
   AttestedExceedsObserved: toFunctionSelector('AttestedExceedsObserved()'),
   AttestedExceedsWrites: toFunctionSelector('AttestedExceedsWrites()'),
   NoSuchSweep: toFunctionSelector('NoSuchSweep()'),

@@ -745,9 +745,8 @@ await check('the coverage lookup stays cheap however long the history gets', asy
   const { chain, addr } = await fresh()
   // Each claim asserts one attested record, so write one per sweep first.
   await attestMany(chain, addr, 1024)
-  const commit = (i) => chain.call(ATTESTER, addr, 'commitSweep', [BigInt(i * 10), BigInt(i * 10 + 9), 1, 1, ZERO32])
-  // A block outside every range is the worst case: it walks the full depth
-  // rather than stopping early on a hit.
+  // Contiguous claims, exactly as a repeating census produces them.
+  const commit = (i) => chain.call(ATTESTER, addr, 'commitSweep', [0n, BigInt(i * 10 + 9), 1, 1, ZERO32])
   const worstCase = async () => (await chain.call(STRANGER, addr, 'isWithinSweep', [9_999_999n])).gasUsed
 
   for (let i = 0; i < 64; i++) await commit(i)
@@ -755,27 +754,40 @@ await check('the coverage lookup stays cheap however long the history gets', asy
   for (let i = 64; i < 1024; i++) await commit(i)
   const at1024 = await worstCase()
 
-  // The answer must still be right at both ends of the range.
+  // The answer must still be right at both ends of the covered span.
   assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [5n])).result, true)
-  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [10_235n])).result, true)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [10_239n])).result, true)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [10_240n])).result, false)
   assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [9_999_999n])).result, false)
 
-  // Sixteen times the history must not cost sixteen times the gas.
-  assert.ok(at1024 < at64 * 3n, `growth is not logarithmic: ${at64} -> ${at1024}`)
-  assert.ok(at1024 < 60_000n, `a single lookup costs ${at1024} gas`)
+  // Sixteen times the history, the same price: coverage is one interval, so
+  // there is nothing to search and nothing the attester can inflate.
+  assert.equal(at1024, at64, `the lookup got more expensive: ${at64} -> ${at1024}`)
+  assert.ok(at1024 < 10_000n, `a single lookup costs ${at1024} gas`)
 })
 
-await check('sweeps must advance and never overlap', async () => {
-  // The ordering is what makes the binary search correct, so it is enforced
-  // rather than assumed.
+await check('re-sweeping covered ground is allowed; reaching back before it is not', async () => {
+  /**
+   * This rule used to demand a strictly LATER fromBlock, so that ranges were
+   * disjoint and the lookup could binary-search them. It made the feature
+   * unusable: the census sweeps from the registry's deployment block every
+   * pass, so the second run reverted here after paying for the whole backfill.
+   *
+   * Overlap is the normal case and is allowed. Reaching back BEFORE where
+   * coverage began is not: that is a different claim from "I swept further",
+   * and making it silently would move the floor under every answer this
+   * contract has already given.
+   */
   const { chain, addr } = await fresh()
   await attestMany(chain, addr, 10)
   await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 10, 10, ZERO32])
-  for (const [from, to] of [[100n, 300n], [150n, 400n], [200n, 250n], [50n, 99n]]) {
+
+  for (const [from, to] of [[100n, 300n], [150n, 400n], [201n, 450n]]) {
     const r = await chain.call(ATTESTER, addr, 'commitSweep', [from, to, 1, 1, ZERO32])
-    assert.equal(r.selector, ERRORS.InvalidRange, `range ${from}-${to} should be refused`)
+    assert.equal(r.reverted, false, `overlapping range ${from}-${to} was refused`)
   }
-  assert.equal((await chain.call(ATTESTER, addr, 'commitSweep', [201n, 300n, 1, 1, ZERO32])).reverted, false)
+  const back = await chain.call(ATTESTER, addr, 'commitSweep', [50n, 500n, 1, 1, ZERO32])
+  assert.equal(back.selector, ERRORS.InvalidRange, 'coverage must not silently extend backwards')
 })
 
 await check('a claim can be withdrawn, and the withdrawal is on the record', async () => {
@@ -869,6 +881,84 @@ await check('the frozen v2 source still compiles, so the live deployment stays v
   assert.match(out, /compiled: ProvenanceAttestations/)
   // Restore the v3 artifacts the rest of the suite and the deploy script use.
   execFileSync('node', ['script/compile.mjs'], { encoding: 'utf8' })
+})
+
+await check('a second full-history pass can publish its coverage', async () => {
+  /**
+   * The census sweeps from the registry's deployment block every time — that
+   * is what "full history" means, and AUDIT_WINDOW=all is the default. The
+   * ordering rule I added to keep the lookup cheap demanded a strictly LATER
+   * fromBlock, so every run after the first paid for the whole backfill and
+   * then reverted on the one call the run exists to make. The coverage layer
+   * could publish exactly once in its lifetime.
+   */
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 20)
+  const DEPLOY = 58_396_729n
+
+  const first = await chain.call(ATTESTER, addr, 'commitSweep', [DEPLOY, 76_000_000n, 20, 20, ZERO32])
+  assert.equal(first.reverted, false)
+
+  // The same range, one block further on: what the next census produces.
+  const second = await chain.call(ATTESTER, addr, 'commitSweep', [DEPLOY, 76_050_000n, 20, 20, ZERO32])
+  assert.equal(second.reverted, false, `a re-sweep reverted with ${second.selector}`)
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 2n)
+
+  // Coverage is the union, and the newly swept blocks are inside it.
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [76_020_000n])).result, true)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [DEPLOY])).result, true)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [DEPLOY - 1n])).result, false)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [76_050_001n])).result, false)
+})
+
+await check('coverage must advance and may not leave a hole behind it', async () => {
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 20)
+  await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 20, 20, ZERO32])
+
+  // Not advancing the frontier claims nothing new.
+  for (const [from, to] of [[100n, 200n], [150n, 199n], [0n, 50n]]) {
+    const r = await chain.call(ATTESTER, addr, 'commitSweep', [from, to, 1, 1, ZERO32])
+    assert.equal(r.selector, ERRORS.InvalidRange, `accepted a non-advancing [${from},${to}]`)
+  }
+  // A gap would make "inside a swept range" a lie for the blocks in between.
+  const gap = await chain.call(ATTESTER, addr, 'commitSweep', [300n, 400n, 1, 1, ZERO32])
+  assert.equal(gap.selector, ERRORS.CoverageGap)
+  // Butting up against the frontier is contiguous, and allowed.
+  const next = await chain.call(ATTESTER, addr, 'commitSweep', [201n, 400n, 1, 1, ZERO32])
+  assert.equal(next.reverted, false)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [250n])).result, true)
+})
+
+await check('withdrawing a coverage claim rolls the frontier back with it', async () => {
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 20)
+  await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 20, 20, ZERO32])
+  await chain.call(ATTESTER, addr, 'commitSweep', [100n, 300n, 20, 20, ZERO32])
+
+  // Only the newest claim can be withdrawn: withdrawing one the later claims
+  // have already superseded would say nothing about what is covered.
+  assert.equal((await chain.call(ATTESTER, addr, 'retractSweep', [0n])).selector, ERRORS.NotLatestSweep)
+
+  assert.equal((await chain.call(ATTESTER, addr, 'retractSweep', [1n])).reverted, false)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [250n])).result, false,
+    'the withdrawn range must stop reading as covered')
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [150n])).result, true,
+    'and what the earlier claim still covers must remain covered')
+
+  // The entry itself stays, with its original numbers and its withdrawal.
+  const sw = (await chain.call(STRANGER, addr, 'sweepAt', [1n])).result
+  assert.equal(sw.retracted, true)
+  assert.equal(sw.toBlock, 300n)
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 2n)
+
+  // Withdraw the last live one and the service reads as never having stated
+  // its coverage — not as having covered nothing.
+  assert.equal((await chain.call(ATTESTER, addr, 'retractSweep', [0n])).reverted, false)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [150n])).result, false)
+  // …and it can start again afterwards.
+  assert.equal((await chain.call(ATTESTER, addr, 'commitSweep', [100n, 400n, 20, 20, ZERO32])).reverted, false)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [350n])).result, true)
 })
 
 console.log('\ndeclaring nothing is a finding, not a silence')
