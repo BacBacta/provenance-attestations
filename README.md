@@ -135,15 +135,59 @@ CONTRACT_SOURCE=contracts/deployed/ProvenanceAttestationsV2.sol npm run compile
 
 ## Deploy (Celo mainnet)
 
+The deployer becomes the owner, permanently and in the creation transaction, so
+**which key you deploy from is the key-split decision** — it cannot be set
+afterwards without a handover. Deploy from the cold key:
+
 ```bash
-read -s PRIVATE_KEY && export PRIVATE_KEY    # fresh key, a few CELO, never a main wallet
-npm run deploy
+# On the machine where the COLD key lives — never in a hosted session.
+read -s PRIVATE_KEY && export PRIVATE_KEY        # the cold key: owner
+export ATTESTER=0x…                              # the hot key: attests, nothing more
+npm ci && npm test && npm run deploy
 ```
 
-Writes `deployments/celo.json`. Then verify the source on the explorer:
-Contract → Verify & publish → Standard JSON input → upload
+That is the whole split: owner cold, attester hot, from the first block. The
+cold key needs roughly 0.05 CELO for the deployment and then never has to be
+online again except to rotate a compromised attester.
+
+If you must deploy from the hot key, hand ownership over afterwards — the
+transfer is two-step, so a mistyped address cannot lock the contract:
+
+```
+transferOwnership(<cold>)   from the hot key
+acceptOwnership()           from the cold key
+```
+
+Deploying with `ATTESTER` unset makes one key both roles and prints a warning
+saying so: the owner's only power is rotating a compromised attester, and that
+defence is worthless when the same key is the one compromised.
+
+`npm run deploy` archives the record it replaces (`deployments/celo-v2.json`)
+before writing `deployments/celo.json`, so the address of a contract that is
+still on chain holding published verdicts is never erased. Then verify the
+source:
+
+```bash
+npm run verify        # refuses if out/ does not match the deployed bytecode
+```
+
+Or by hand: Contract → Verify & publish → Standard JSON input → upload
 `out/standard-input.json` (compiler v0.8.28). The bytecode targets `paris`, so
 it runs identically on any EVM chain.
+
+### Deploying v3 over a live v2
+
+v3 is a **new contract at a new address**. The 20,097 verdicts stay on
+`0x3ed53c…01ab` under v2's semantics, and the new contract starts empty — every
+record reads `None` until it is backfilled. Two consequences worth stating
+before you deploy:
+
+- Anything already reading the v2 address keeps reading v2. Announce the new
+  address rather than assuming a migration happened.
+- The backfill needs an export from a **current** audit run: v3 records the
+  attribution, amount and observation date that older exports do not carry.
+  `deployments/backfill-progress.json` from the v2 run must not be reused — the
+  script refuses it, because those rows are on a different contract.
 
 ## Backfill the audit's verdicts
 

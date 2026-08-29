@@ -27,7 +27,7 @@
 import { createWalletClient, createPublicClient, http, formatEther } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { celo } from 'viem/chains'
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 
 const RPC = process.env.CELO_RPC_URL ?? 'https://forno.celo.org'
 const PK = process.env.PRIVATE_KEY
@@ -72,8 +72,32 @@ if (receipt.status !== 'success') {
 }
 
 mkdirSync('deployments', { recursive: true })
+
+/**
+ * Keep the record this one replaces.
+ *
+ * `deployments/celo.json` is the only place the address of a live contract is
+ * written down, and overwriting it in place erases the identity of a contract
+ * that is still on chain holding published verdicts. Anything reading that file
+ * afterwards — the backfill, the verifier — silently describes a different
+ * deployment. The previous record is archived under its own version first.
+ */
+if (existsSync('deployments/celo.json')) {
+  const prior = JSON.parse(readFileSync('deployments/celo.json', 'utf8'))
+  let archive = `deployments/celo-${prior.version ? `v${prior.version.split('.')[0]}` : 'previous'}.json`
+  for (let n = 2; existsSync(archive); n++) archive = archive.replace(/(-\d+)?\.json$/, `-${n}.json`)
+  writeFileSync(archive, JSON.stringify(prior, null, 2))
+  console.log(`\narchived  ${prior.address} → ${archive}`)
+}
+
+let version = null
+try {
+  version = await pub.readContract({ address: receipt.contractAddress, abi, functionName: 'VERSION' })
+} catch { /* a contract without VERSION() predates it */ }
+
 const record = {
   contract: 'ProvenanceAttestations',
+  version,
   address: receipt.contractAddress,
   deployer: account.address,
   attester,
