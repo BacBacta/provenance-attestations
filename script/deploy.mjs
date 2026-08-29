@@ -24,7 +24,10 @@
  *   transferOwnership(<cold>)   from the hot key
  *   acceptOwnership()           from the cold key
  */
-import { createWalletClient, createPublicClient, http, formatEther, getContractAddress } from 'viem'
+import {
+  createWalletClient, createPublicClient, http, formatEther, getContractAddress,
+  encodeAbiParameters,
+} from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { celo } from 'viem/chains'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
@@ -66,12 +69,32 @@ if (attester.toLowerCase() === account.address.toLowerCase()) {
  * the actual number costs one RPC call.
  */
 const gasPrice = await pub.getGasPrice()
-const needed = 2_000_000n * gasPrice
+/**
+ * Estimate the deployment, do not guess it.
+ *
+ * The guard budgeted a flat 2,000,000 gas. v4 costs 2,655,194 — so the check
+ * passed on a balance that could not pay, and the operator got the very
+ * "Transaction creation failed" this block exists to translate. A constant
+ * cannot track a contract that keeps growing; an estimate can, and the 25%
+ * headroom covers the gap between estimation and the block that lands it.
+ */
+let gasNeeded
+try {
+  gasNeeded = await pub.estimateGas({
+    account,
+    data: bytecode + encodeAbiParameters([{ type: 'address' }], [attester]).slice(2),
+  })
+} catch (e) {
+  gasNeeded = 3_500_000n
+  console.log(`  (gas estimation failed: ${e.shortMessage ?? e.message}; budgeting ${gasNeeded})`)
+}
+const needed = (gasNeeded * 125n) / 100n * gasPrice
 if (balance < needed) {
   console.error(
     `\nThe deployer cannot cover this deployment.\n` +
     `  balance  ${formatEther(balance)} CELO\n` +
-    `  needed   ~${formatEther(needed)} CELO at ${formatEther(gasPrice * 1_000_000_000n)} gwei\n` +
+    `  needed   ~${formatEther(needed)} CELO for ${gasNeeded} gas ` +
+      `at ${formatEther(gasPrice * 1_000_000_000n)} gwei (25% headroom)\n` +
     `Fund ${account.address} and re-run.`,
   )
   process.exit(1)
@@ -106,7 +129,30 @@ if (balance < needed) {
 if (existsSync('deployments/celo.json')) {
   const prior = JSON.parse(readFileSync('deployments/celo.json', 'utf8'))
   if (prior.chainId === celo.id && prior.address) {
-    const priorCode = await pub.getBytecode({ address: prior.address }).catch(() => null)
+    /**
+     * "I could not ask" is not "there is nothing there".
+     *
+     * This read used to swallow every RPC failure into `null`, which is
+     * exactly the value that means "no code at this address" — so a node
+     * answering -32000, a timeout or a dropped connection silently disarmed
+     * the one guard standing between a rerun and two live contracts. The
+     * failure mode it protects against is a forked ledger, so an unanswered
+     * question has to stop the deployment, not wave it through.
+     */
+    let priorCode
+    try {
+      priorCode = await pub.getBytecode({ address: prior.address })
+    } catch (e) {
+      console.error(
+        `\nCannot tell whether ${prior.address} is still live: ${e.shortMessage ?? e.message}\n` +
+        'Refusing to deploy on an unanswered question — two live contracts is a forked\n' +
+        'ledger, with consumers reading one while the attester writes the other.\n' +
+        'Retry, or set REDEPLOY=1 if you have checked the address by hand.',
+      )
+      if (process.env.REDEPLOY !== '1') process.exit(1)
+      console.error('REDEPLOY=1 — proceeding on an unverified prior address.\n')
+      priorCode = null
+    }
     if (priorCode) {
       console.error(
         `\nA contract is already deployed and recorded for this chain.\n` +
@@ -123,15 +169,78 @@ if (existsSync('deployments/celo.json')) {
   }
 }
 
-const nonce = await pub.getTransactionCount({ address: account.address })
+/**
+ * The nonce viem will actually use, which is the PENDING one.
+ *
+ * This read took viem's default, blockTag 'latest', while
+ * prepareTransactionRequest fills the transaction from 'pending'. With one of
+ * the deployer's transactions still in the mempool the two differ by one, so
+ * the script computed CREATE(N), watched CREATE(N) for code, found none, and
+ * announced that nothing had been deployed — while the contract was being
+ * created at CREATE(N+1). The recovery path printed below would then have been
+ * followed for a deployment that had in fact succeeded, at an address nobody
+ * had written down.
+ */
+const nonce = await pub.getTransactionCount({ address: account.address, blockTag: 'pending' })
+const mined = await pub.getTransactionCount({ address: account.address, blockTag: 'latest' })
+if (nonce !== mined) {
+  console.error(
+    `\nThe deployer has ${nonce - mined} transaction(s) still in the mempool ` +
+    `(latest ${mined}, pending ${nonce}).\n` +
+    'Deploying now stacks this contract behind them, and its address depends on\n' +
+    'whether they land. Wait for them to confirm and re-run.',
+  )
+  process.exit(1)
+}
 const expected = getContractAddress({ from: account.address, nonce: BigInt(nonce) })
 console.log(`address   ${expected}  (deterministic: deployer + nonce ${nonce})`)
 
 if (await pub.getBytecode({ address: expected })) {
+  /**
+   * Say it, and then actually do it.
+   *
+   * This branch announced "recording it instead of repeating it" and exited
+   * without writing anything, so the one path that exists to recover a
+   * deployment whose receipt was lost left the operator exactly where they
+   * started: a live contract at a known address, and no record of it. That is
+   * the state this project spent an afternoon recovering from by hand.
+   */
   console.error(
     `\nA contract already exists at ${expected}.\n` +
-    'This deployment has already happened — recording it instead of repeating it.',
+    'This deployment has already happened. Recording it from chain state.',
   )
+  const read = (fn) => pub.readContract({ address: expected, abi, functionName: fn }).catch(() => null)
+  const [v, o, a] = await Promise.all([read('VERSION'), read('owner'), read('attester')])
+  if (!o || !a) {
+    console.error(
+      'But its owner and attester could not be read, so nothing was written.\n' +
+      'Check the address by hand before trusting deployments/celo.json.',
+    )
+    process.exit(1)
+  }
+  mkdirSync('deployments', { recursive: true })
+  if (existsSync('deployments/celo.json')) {
+    const prior = JSON.parse(readFileSync('deployments/celo.json', 'utf8'))
+    if (prior.address && prior.address.toLowerCase() !== expected.toLowerCase()) {
+      writeFileSync('deployments/celo-previous.json', JSON.stringify(prior, null, 2))
+    }
+  }
+  writeFileSync('deployments/celo.json', JSON.stringify({
+    contract: 'ProvenanceAttestations',
+    version: v,
+    address: expected,
+    deployer: account.address,
+    owner: o,
+    attester: a,
+    txHash: null,
+    block: null,
+    chainId: celo.id,
+    deployedAt: new Date().toISOString(),
+    note: 'Recovered from chain state: the contract was found already deployed at the ' +
+      'address this deployer and nonce produce. txHash and block are unknown because ' +
+      'this run did not send the transaction.',
+  }, null, 2))
+  console.error(`Wrote deployments/celo.json — version ${v ?? 'unreadable'}, owner ${o}, attester ${a}.`)
   process.exit(1)
 }
 
