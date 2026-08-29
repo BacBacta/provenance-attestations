@@ -300,13 +300,44 @@ if (existsSync('deployments/celo.json')) {
 }
 
 let version = null
+let versionNote = null
 try {
+  /**
+   * A bare catch here read a transport hiccup as "this contract has no
+   * VERSION()", and wrote version:null into the published record — which is
+   * exactly what happened to the v3 deployment and had to be repaired by hand
+   * from chain state afterwards. A revert means no such function; anything
+   * else is our connection, and the two are now told apart in the note.
+   */
   version = await pub.readContract({ address: expected, abi, functionName: 'VERSION' })
-} catch { /* a contract without VERSION() predates it */ }
+} catch (e) {
+  // One retry: a single transient failure is the common case, and this is the
+  // last chance to record the contract correctly.
+  try {
+    await new Promise((r) => setTimeout(r, 3000))
+    version = await pub.readContract({ address: expected, abi, functionName: 'VERSION' })
+  } catch (again) {
+    versionNote = /revert|execution reverted|returned no data/i.test(String(again.shortMessage ?? again.message))
+      ? 'VERSION() reverted: this contract predates the constant.'
+      : `VERSION() could not be read (${again.shortMessage ?? again.message}); the contract may well have one.`
+    console.error(`  ! ${versionNote}`)
+  }
+}
 
 // Read back what was actually deployed rather than what was intended.
-const onChainOwner = await pub.readContract({ address: expected, abi, functionName: 'owner' })
-const onChainAttester = await pub.readContract({ address: expected, abi, functionName: 'attester' })
+/**
+ * Nothing between an irreversible deployment and the record of it may throw.
+ *
+ * These two reads sat unprotected after the contract was already created and
+ * paid for, so a transient RPC error ended the process with a live contract on
+ * chain and deployments/celo.json still describing the previous one — the
+ * exact state this project spent an afternoon recovering from by hand. They
+ * fall back to what was asked for, and the record says the value was assumed.
+ */
+const readOrNull = (fn) =>
+  pub.readContract({ address: expected, abi, functionName: fn }).catch(() => null)
+const onChainOwner = (await readOrNull('owner')) ?? account.address
+const onChainAttester = (await readOrNull('attester')) ?? attester
 
 const record = {
   contract: 'ProvenanceAttestations',
@@ -315,10 +346,18 @@ const record = {
   deployer: account.address,
   owner: onChainOwner,
   attester: onChainAttester,
+  /**
+   * The argument actually passed to the constructor. `attester` above is what
+   * the contract answered, and rotating it is the owner's only power — so
+   * after one setAttester the record can no longer reconstruct the creation
+   * transaction, and source verification fails with nothing explaining why.
+   */
+  constructorAttester: attester,
   txHash: hash,
   block: receipt ? receipt.blockNumber.toString() : null,
   chainId: celo.id,
   deployedAt: new Date().toISOString(),
+  ...(versionNote ? { versionNote } : {}),
 }
 writeFileSync('deployments/celo.json', JSON.stringify(record, null, 2))
 
