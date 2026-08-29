@@ -61,6 +61,13 @@ const attributed = (over = {}) => claim({
   ...over,
 })
 
+/** Write `n` real attestations, so a coverage claim has writes to be bounded by. */
+async function attestMany(chain, addr, n) {
+  for (let i = 0; i < n; i++) {
+    await chain.call(ATTESTER, addr, 'attest', [claim({ agentId: BigInt(i), feedbackIndex: BigInt(i) })])
+  }
+}
+
 async function fresh() {
   const chain = await newChain()
   const ctor = encodeAbiParameters([{ type: 'address' }], [ATTESTER])
@@ -578,7 +585,10 @@ await check('a sweep publishes what it covered, and only the attester may', asyn
   const { chain, addr } = await fresh()
   assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 0n)
 
-  const args = [100n, 200n, 5000, 4800, EH1]
+  // A claim cannot exceed what the contract has actually recorded, so write
+  // the records first — the number has to be a measurement, not an assertion.
+  await attestMany(chain, addr, 6)
+  const args = [100n, 200n, 8, 6, EH1]
   assert.equal((await chain.call(STRANGER, addr, 'commitSweep', args)).selector, ERRORS.NotAttester)
   assert.equal((await chain.call(OWNER, addr, 'commitSweep', args)).selector, ERRORS.NotAttester)
 
@@ -589,8 +599,9 @@ await check('a sweep publishes what it covered, and only the attester may', asyn
   const s = (await chain.call(STRANGER, addr, 'latestSweep', [])).result
   assert.equal(s.fromBlock, 100n)
   assert.equal(s.toBlock, 200n)
-  assert.equal(s.observed, 5000)
-  assert.equal(s.attested, 4800)
+  assert.equal(s.observed, 8)
+  assert.equal(s.attested, 6)
+  assert.equal(s.retracted, false)
   assert.equal(s.recordsRoot, EH1)
   assert.ok(s.committedAt > 0, 'a claim with no date cannot be aged')
 })
@@ -598,9 +609,15 @@ await check('a sweep publishes what it covered, and only the attester may', asyn
 await check('a sweep that contradicts itself is refused', async () => {
   const { chain, addr } = await fresh()
   // More attested than observed: the claim refutes itself before anyone checks.
+  await attestMany(chain, addr, 12)
   assert.equal(
     (await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 10, 11, ZERO32])).selector,
     ERRORS.AttestedExceedsObserved,
+  )
+  // …and a claim larger than everything this contract has ever written.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 9999, 9999, ZERO32])).selector,
+    ERRORS.AttestedExceedsWrites,
   )
   // An inverted range, and a range that is not yet mined.
   assert.equal((await chain.call(ATTESTER, addr, 'commitSweep', [200n, 100n, 1, 1, ZERO32])).selector, ERRORS.InvalidRange)
@@ -614,17 +631,19 @@ await check('a gap between observed and attested is published, not hidden', asyn
   // The gap is not necessarily wrong — a record can be legitimately out of
   // scope — but it is now a number somebody can argue with.
   const { chain, addr } = await fresh()
-  const r = await chain.call(ATTESTER, addr, 'commitSweep', [1n, 50n, 27520, 20097, EH1])
+  await attestMany(chain, addr, 4)
+  const r = await chain.call(ATTESTER, addr, 'commitSweep', [1n, 50n, 27520, 4, EH1])
   assert.equal(r.logs.length, 1)
   const a = r.logs[0].args
   assert.equal(a.index, 0n)
   assert.equal(a.observed, 27520)
-  assert.equal(a.attested, 20097)
+  assert.equal(a.attested, 4)
   assert.equal(a.recordsRoot, EH1)
 })
 
 await check('sweeps are append-only, and coverage is queryable by block', async () => {
   const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 18)
   await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 10, 10, ZERO32])
   await chain.call(ATTESTER, addr, 'commitSweep', [201n, 300n, 20, 18, EH1])
   assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 2n)
@@ -689,6 +708,8 @@ await check('the coverage lookup stays cheap however long the history gets', asy
    * months.
    */
   const { chain, addr } = await fresh()
+  // Each claim asserts one attested record, so write one per sweep first.
+  await attestMany(chain, addr, 1024)
   const commit = (i) => chain.call(ATTESTER, addr, 'commitSweep', [BigInt(i * 10), BigInt(i * 10 + 9), 1, 1, ZERO32])
   // A block outside every range is the worst case: it walks the full depth
   // rather than stopping early on a hit.
@@ -713,12 +734,45 @@ await check('sweeps must advance and never overlap', async () => {
   // The ordering is what makes the binary search correct, so it is enforced
   // rather than assumed.
   const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 10)
   await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 10, 10, ZERO32])
   for (const [from, to] of [[100n, 300n], [150n, 400n], [200n, 250n], [50n, 99n]]) {
     const r = await chain.call(ATTESTER, addr, 'commitSweep', [from, to, 1, 1, ZERO32])
     assert.equal(r.selector, ERRORS.InvalidRange, `range ${from}-${to} should be refused`)
   }
   assert.equal((await chain.call(ATTESTER, addr, 'commitSweep', [201n, 300n, 1, 1, ZERO32])).reverted, false)
+})
+
+await check('a claim can be withdrawn, and the withdrawal is on the record', async () => {
+  /**
+   * Ranges are strictly ordered so the lookup stays cheap, which means a sweep
+   * committed with wrong numbers can never be re-committed. Retraction is the
+   * only correction available and deliberately not an erasure: the entry stays,
+   * dated and attributable, with its withdrawal beside it.
+   */
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 4)
+  await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 10, 4, EH1])
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [150n])).result, true)
+
+  assert.equal((await chain.call(STRANGER, addr, 'retractSweep', [0n])).selector, ERRORS.NotAttester)
+  const r = await chain.call(ATTESTER, addr, 'retractSweep', [0n])
+  assert.equal(r.reverted, false)
+  assert.equal(r.logs.length, 1)
+  assert.equal(r.logs[0].args.index, 0n)
+
+  // A withdrawn claim covers nothing…
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [150n])).result, false)
+  // …but the entry and its original numbers stay readable.
+  const s = (await chain.call(STRANGER, addr, 'sweepAt', [0n])).result
+  assert.equal(s.retracted, true)
+  assert.equal(s.observed, 10)
+  assert.equal(s.attested, 4)
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 1n)
+
+  // Withdrawing twice, or withdrawing nothing, is refused rather than silent.
+  assert.equal((await chain.call(ATTESTER, addr, 'retractSweep', [0n])).selector, ERRORS.NoSuchSweep)
+  assert.equal((await chain.call(ATTESTER, addr, 'retractSweep', [9n])).selector, ERRORS.NoSuchSweep)
 })
 
 console.log('\nsurface')

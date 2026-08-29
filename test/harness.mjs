@@ -102,5 +102,7 @@ export const ERRORS = {
   ObservationInFuture: toFunctionSelector('ObservationInFuture()'),
   InvalidRange: toFunctionSelector('InvalidRange()'),
   AttestedExceedsObserved: toFunctionSelector('AttestedExceedsObserved()'),
+  AttestedExceedsWrites: toFunctionSelector('AttestedExceedsWrites()'),
+  NoSuchSweep: toFunctionSelector('NoSuchSweep()'),
   DimensionMismatch: toFunctionSelector('DimensionMismatch()'),
 }

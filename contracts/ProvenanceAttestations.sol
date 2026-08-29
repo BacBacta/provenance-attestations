@@ -196,6 +196,17 @@ contract ProvenanceAttestations {
         uint32 observed;
         uint32 attested;
         uint40 committedAt;
+        /**
+         * Withdrawn by the attester.
+         *
+         * Ranges are strictly ordered so the membership question stays cheap,
+         * which means a sweep committed with wrong numbers can never be
+         * re-committed. Retraction is the only correction available, and it is
+         * deliberately not an erasure: the entry stays, dated and attributable,
+         * with its withdrawal beside it. A claim withdrawn is not a claim
+         * unmade, and the record of having made it is the point.
+         */
+        bool retracted;
         /// @dev Merkle root over the sorted {key} of every record OBSERVED in
         ///      the range — never of the subset that was attested. That is the
         ///      whole point: a root over what was written proves only what the
@@ -266,6 +277,9 @@ contract ProvenanceAttestations {
         bytes32 recordsRoot
     );
 
+    /// @notice Emitted when the attester withdraws a coverage claim.
+    event SweepRetracted(uint256 indexed index, uint64 fromBlock, uint64 toBlock);
+
     // ---------------------------------------------------------------- errors
 
     error NotOwner();
@@ -284,6 +298,10 @@ contract ProvenanceAttestations {
     error InvalidRange();
     /// @dev More records attested than were observed: the claim refutes itself.
     error AttestedExceedsObserved();
+    /// @dev More records claimed as attested than this contract has ever written.
+    error AttestedExceedsWrites();
+    /// @dev No sweep at that index, or it is already withdrawn.
+    error NoSuchSweep();
     /// @dev The headline verdict and the payment dimension name different outcomes.
     error DimensionMismatch();
 
@@ -549,16 +567,37 @@ contract ProvenanceAttestations {
         uint256 n = _sweeps.length;
         if (n != 0 && fromBlock <= _sweeps[n - 1].toBlock) revert InvalidRange();
 
+        /**
+         * A coverage claim cannot exceed what this contract has actually
+         * recorded. It is the one quantity the contract observes for itself,
+         * and without the check `attested` was a number the attester simply
+         * asserted — published, in a field the reader takes for a measurement.
+         */
+        if (attested > totalAttestations) revert AttestedExceedsWrites();
+
         _sweeps.push(Sweep({
             fromBlock: fromBlock,
             toBlock: toBlock,
             observed: observed,
             attested: attested,
             committedAt: uint40(block.timestamp),
+            retracted: false,
             recordsRoot: recordsRoot
         }));
 
         emit SweepCommitted(_sweeps.length - 1, fromBlock, toBlock, observed, attested, recordsRoot);
+    }
+
+    /// @notice Withdraw a coverage claim that should not have been made.
+    /// @dev    Marks, never deletes. The entry and its original numbers stay
+    ///         readable through {sweepAt}, and the withdrawal is an event of
+    ///         its own — a service correcting itself in public is doing the
+    ///         thing this ledger asks of everybody else. {isWithinSweep} stops
+    ///         counting the range, because a withdrawn claim covers nothing.
+    function retractSweep(uint256 index) external onlyAttester {
+        if (index >= _sweeps.length || _sweeps[index].retracted) revert NoSuchSweep();
+        _sweeps[index].retracted = true;
+        emit SweepRetracted(index, _sweeps[index].fromBlock, _sweeps[index].toBlock);
     }
 
     // ----------------------------------------------------------------- read
@@ -596,7 +635,9 @@ contract ProvenanceAttestations {
             Sweep storage sw = _sweeps[mid];
             if (blockNumber < sw.fromBlock) hi = mid;
             else if (blockNumber > sw.toBlock) lo = mid + 1;
-            else return true;
+            // Found the range that contains it. A withdrawn claim covers
+            // nothing, so the answer is the claim's standing, not its presence.
+            else return !sw.retracted;
         }
         return false;
     }
