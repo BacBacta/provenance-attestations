@@ -21,7 +21,7 @@ import { celo } from 'viem/chains'
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import {
   parseClaimsCsvStrict, indexCache, buildAttestations, chunk,
-  fingerprint, toClaimStruct, VERDICT_NAMES, recordKey, merkleRoot,
+  fingerprint, toClaimStruct, VERDICT_NAMES,
 } from './backfill-lib.mjs'
 
 const DRY = process.env.DRY_RUN !== '0'
@@ -30,7 +30,17 @@ const RPC = process.env.CELO_RPC_URL ?? 'https://forno.celo.org'
 // narrower payment-claims file when only those are wanted.
 const CLAIMS = process.env.CLAIMS_CSV ?? '../celo-agent-feedback-audit/out/evidence.csv'
 const CACHE = process.env.FEEDBACK_CACHE ?? '../celo-agent-feedback-audit/data-bs/feedback-58396729.jsonl'
+/**
+ * `Number('1_000')` is NaN, and `chunk(rows, NaN)` returns a single EMPTY
+ * batch: the script broadcast attestBatch([]), wrote an inFlight marker for
+ * it, and announced "Backfill complete — 0 of 5 rows attested". A typo in an
+ * environment variable must not be able to end a run that way.
+ */
 const BATCH = Number(process.env.BATCH_SIZE ?? 100)
+if (!Number.isInteger(BATCH) || BATCH < 1) {
+  console.error(`BATCH_SIZE must be a positive whole number; got ${JSON.stringify(process.env.BATCH_SIZE)}.`)
+  process.exit(1)
+}
 // Rows already written, so an interrupted backfill of ~10,000 rows resumes
 // instead of paying twice and doubling every revision counter.
 const PROGRESS = process.env.PROGRESS_FILE ?? 'deployments/backfill-progress.json'
@@ -164,6 +174,62 @@ if (duplicateTxs.length) {
   console.log('  and nothing here can say which. Resolve upstream, or FORCE=1.')
 }
 
+/**
+ * The coverage manifest, checked BEFORE a single transaction is sent.
+ *
+ * All of these used to be evaluated after the last attestBatch: a missing
+ * file, a manifest with no root, or a range that does not describe this export
+ * were discovered only once the whole backfill — 1.23 billion gas across 42
+ * transactions — had been paid for. A pre-spend gate is the only place a
+ * check like this is worth anything.
+ */
+let sweepManifest = null
+if (!existsSync(SWEEP)) {
+  blocking++
+  console.log(`\nNO COVERAGE MANIFEST at ${SWEEP}.`)
+  console.log('  Without it the ledger proves what was written and nothing about what was')
+  console.log('  not. Re-run the audit to produce out/sweep.json, or set SWEEP_JSON.')
+} else {
+  try {
+    sweepManifest = JSON.parse(readFileSync(SWEEP, 'utf8'))
+  } catch (err) {
+    blocking++
+    console.log(`\nCOVERAGE MANIFEST UNREADABLE: ${err.message}`)
+  }
+}
+if (sweepManifest) {
+  const root = sweepManifest.observedRoot
+  if (typeof root !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(root)) {
+    blocking++
+    console.log(`\nCOVERAGE MANIFEST HAS NO ROOT — a claim without a root over the observed`)
+    console.log('  set cannot locate an omission, which is the only thing it is for.')
+  }
+  const observed = Number(sweepManifest.observed)
+  if (!Number.isFinite(observed) || rows.length > observed) {
+    blocking++
+    console.log(`\nMANIFEST DOES NOT DESCRIBE THIS EXPORT: ${rows.length} rows to attest,`)
+    console.log(`  ${sweepManifest.observed} records observed. They are different runs.`)
+  }
+  /**
+   * And the range must actually contain the rows. The old check compared only
+   * the counts, so a manifest from another window could be published beside
+   * this export's verdicts: records attested but outside the range claimed to
+   * cover them, which is precisely the omission the claim exists to expose.
+   */
+  const blocks = rows.map((r) => r.block).filter((b) => typeof b === 'bigint')
+  if (blocks.length) {
+    const lo = blocks.reduce((a, b) => (b < a ? b : a))
+    const hi = blocks.reduce((a, b) => (b > a ? b : a))
+    const from = BigInt(sweepManifest.fromBlock ?? 0)
+    const to = BigInt(sweepManifest.toBlock ?? 0)
+    if (lo < from || hi > to) {
+      blocking++
+      console.log(`\nATTESTED ROWS FALL OUTSIDE THE CLAIMED RANGE:`)
+      console.log(`  rows span blocks ${lo}–${hi}; the manifest claims ${from}–${to}.`)
+    }
+  }
+}
+
 if (blocking && !FORCE) {
   console.log(`\n${blocking} category of problem must be resolved before writing.`)
   console.log('Fix the export, or set FORCE=1 to attest the rows that did pass anyway.')
@@ -215,10 +281,35 @@ console.log(`attester      ${account.address}`)
 const localCode = readFileSync('out/ProvenanceAttestations.deployed.bin', 'utf8').trim().toLowerCase()
 const onChainCode = String((await pub.getBytecode({ address: deployment.address })) ?? '')
   .replace(/^0x/, '').toLowerCase()
-// The trailing metadata hash differs per compilation; the body is what matters.
-const codeBody = (h) => h.slice(0, Math.max(0, h.length - 106))
+/**
+ * Strip the trailing CBOR metadata, which differs per compilation.
+ *
+ * 106 hex characters is not a guess: solc 0.8.28 with bytecodeHash='ipfs'
+ * (script/compile.mjs) emits a2 64 'ipfs' 58 22 <34 bytes> 64 'solc' 43
+ * <3 bytes> = 51 bytes, plus the two-byte length 0x0033 = 53 bytes. But a
+ * compiler-settings change would move it silently and turn this comparison
+ * into a coin toss, so the marker is checked rather than assumed: the two
+ * bytes before the tail must be exactly its length.
+ */
+const META_HEX = 106
+const codeBody = (h) => h.slice(0, Math.max(0, h.length - META_HEX))
+const metaLooksRight = (h) => {
+  if (h.length < META_HEX) return false
+  const declared = parseInt(h.slice(-4), 16)
+  return declared * 2 + 4 === META_HEX
+}
 if (!onChainCode) {
   console.error(`\nNo contract at ${deployment.address}.`)
+  process.exit(1)
+}
+if (!metaLooksRight(localCode) || !metaLooksRight(onChainCode)) {
+  console.error(
+    `\nThe compiled bytecode does not end in the metadata tail this check assumes.\n` +
+    `  compiled tail length ${parseInt(localCode.slice(-4), 16)} bytes\n` +
+    `  on-chain tail length ${parseInt(onChainCode.slice(-4), 16)} bytes\n` +
+    `Comparing bodies would be guessing. Check the compiler settings in\n` +
+    `script/compile.mjs before spending anything.`,
+  )
   process.exit(1)
 }
 if (codeBody(onChainCode) !== codeBody(localCode)) {
@@ -260,6 +351,7 @@ if (String(onChainAttester).toLowerCase() !== account.address.toLowerCase()) {
 const TARGET = String(deployment.address).toLowerCase()
 
 let doneRows = 0
+let sweepCommitted = false
 if (existsSync(PROGRESS)) {
   try {
     const prior = JSON.parse(readFileSync(PROGRESS, 'utf8'))
@@ -309,6 +401,10 @@ if (existsSync(PROGRESS)) {
     }
 
     doneRows = prior.completedRows ?? 0
+    // Recorded by the run that published it. Absent in markers written before
+    // this field existed, which reads as "not committed" — the safe direction:
+    // committing twice is refused on chain, never committing is silent.
+    sweepCommitted = prior.sweepCommitted === true
 
     /**
      * A batch may have been broadcast and its receipt lost — a dropped
@@ -336,9 +432,24 @@ if (existsSync(PROGRESS)) {
 
 const pending = rows.slice(doneRows)
 if (doneRows) console.log(`resuming after ${doneRows} completed row(s); ${pending.length} to go`)
+/**
+ * A finished backfill is not necessarily a finished RUN.
+ *
+ * This used to exit 0 here, and the coverage claim is published further down.
+ * So a run that wrote every row and then failed to commit its sweep — a
+ * missing manifest, a revert, a dropped connection — could never publish it:
+ * the marker said every row was done, the next run exited before reaching the
+ * block, and the one claim that makes omission falsifiable was lost for good,
+ * with 1.23 billion gas already spent. It falls through now, and the marker
+ * records whether the sweep itself was committed.
+ */
 if (!pending.length) {
-  console.log('\nNothing left to write — the marker says every row is already on chain.')
-  process.exit(0)
+  console.log('\nEvery row is already on chain according to the marker.')
+  if (sweepCommitted) {
+    console.log('Its coverage claim was committed too — nothing left to do.')
+    process.exit(0)
+  }
+  console.log('Its coverage claim was NOT committed. Publishing it now.')
 }
 
 const allBatches = chunk(pending, BATCH)
@@ -353,6 +464,10 @@ const marker = (extra) => JSON.stringify({
   completedRows: written,
   totalRows: rows.length,
   batchSize: BATCH,
+  // So a run that wrote every row but never published its coverage claim can
+  // still publish it. Without this the next run saw "all rows done" and exited
+  // before reaching the block, losing the claim for good.
+  sweepCommitted,
   updatedAt: new Date().toISOString(),
   ...extra,
 }, null, 2)
@@ -392,37 +507,8 @@ console.log(`\nBackfill complete — ${written} of ${rows.length} rows attested.
  * Re-index the range, count, rebuild the root, compare.
  */
 if (written === rows.length) {
-  if (!existsSync(SWEEP)) {
-    console.error(`\nNo coverage manifest at ${SWEEP} — the sweep was NOT committed.`)
-    console.error('Without it the ledger proves what was written and nothing about what was not.')
-    console.error('Re-run the audit to produce out/sweep.json, or set SWEEP_JSON.')
-    process.exit(3)
-  }
-  const sweep = JSON.parse(readFileSync(SWEEP, 'utf8'))
-
-  /**
-   * The root is CARRIED, never rebuilt here.
-   *
-   * It must cover what the indexer OBSERVED — that is the only set an omission
-   * can be measured against. Rebuilding it over the rows this run wrote would
-   * commit to the attested subset, which proves nothing the events do not
-   * already prove, while the contract documents it as covering the observed
-   * set. The claim would then be false in exactly the direction that flatters
-   * the attester.
-   */
+  const sweep = sweepManifest
   const root = sweep.observedRoot
-  if (typeof root !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(root)) {
-    console.error(`\n${SWEEP} carries no observedRoot. Re-run the audit: a coverage claim`)
-    console.error('without a root over the observed set cannot locate an omission.')
-    process.exit(3)
-  }
-  // Cross-check that the manifest describes this export: every attested record
-  // must be one the indexer says it saw.
-  if (rows.length > Number(sweep.observed)) {
-    console.error('\nMore rows attested than records observed. The manifest and the export')
-    console.error('describe different runs; nothing committed.')
-    process.exit(1)
-  }
 
   console.log('\ncoverage claim')
   console.log(`  blocks    ${sweep.fromBlock}–${sweep.toBlock}`)
@@ -430,15 +516,28 @@ if (written === rows.length) {
   console.log(`  attested  ${rows.length}   (verdicts written by this run)`)
   console.log(`  root      ${root}   (over the observed set, from the indexer)`)
 
+  /**
+   * Broadcast, then record — in that order, and record before awaiting the
+   * receipt, for the same reason a batch does: a claim that was sent and whose
+   * receipt was lost has landed or will land, and a second commitSweep over
+   * the same frontier is refused on chain anyway.
+   */
   const hash = await wallet.writeContract({
     address: deployment.address,
     abi,
     functionName: 'commitSweep',
     args: [BigInt(sweep.fromBlock), BigInt(sweep.toBlock), Number(sweep.observed), rows.length, root],
   })
+  sweepCommitted = true
+  writeFileSync(PROGRESS, marker({ sweepInFlight: hash }))
   const receipt = await pub.waitForTransactionReceipt({ hash })
   console.log(`  committed — ${receipt.status} — ${hash}`)
-  if (receipt.status !== 'success') process.exit(1)
+  if (receipt.status !== 'success') {
+    sweepCommitted = false
+    writeFileSync(PROGRESS, marker({}))
+    process.exit(1)
+  }
+  writeFileSync(PROGRESS, marker({}))
 } else {
   console.log('\nPartial run: no coverage claim committed. A sweep must describe a completed pass.')
 }

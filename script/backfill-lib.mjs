@@ -485,6 +485,13 @@ export function buildAttestations(claims, cache) {
       paymentToken: amount > 0n && paymentToken !== ZERO_ADDRESS ? paymentToken : ZERO_ADDRESS,
       amountDecimals: Number.isInteger(decimals) && decimals >= 0 && decimals < 256 ? decimals : 0,
       observedAt: finalObservedAt,
+      /**
+       * The block the registry wrote this record in. Not part of the on-chain
+       * claim — `toClaimStruct` selects fields explicitly — but the backfill
+       * needs it to check that every row it attests really falls inside the
+       * range the coverage manifest claims to cover.
+       */
+      block: /^\d+$/.test((c.block ?? '').trim()) ? BigInt(c.block.trim()) : null,
     }
 
     /**
