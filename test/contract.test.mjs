@@ -33,7 +33,7 @@ const V = {
   EvidenceInconclusive: 13,
 }
 const E = { Unknown: 0, Intact: 1, Unbound: 2, Unhashed: 3, Unreachable: 4, Inconclusive: 5, Absent: 6 }
-const P = { Unknown: 0, Attributed: 1, Verified: 2, PartyMismatch: 3, NoValue: 4, Failed: 5, NotFound: 6, ForeignChain: 7 }
+const P = { Unknown: 0, Attributed: 1, Verified: 2, PartyMismatch: 3, NoValue: 4, Failed: 5, NotFound: 6, ForeignChain: 7, NotDeclared: 8 }
 
 /** A well-formed claim, so each test only states what it is actually varying. */
 function claim(over = {}) {
@@ -66,6 +66,19 @@ async function attestMany(chain, addr, n) {
   for (let i = 0; i < n; i++) {
     await chain.call(ATTESTER, addr, 'attest', [claim({ agentId: BigInt(i), feedbackIndex: BigInt(i) })])
   }
+}
+
+/**
+ * One event by name.
+ *
+ * `logs[0]` stopped being the record's own event once the payment dimension
+ * got a second, subscribable one — and a test that indexes blindly starts
+ * asserting about a different event than it means to.
+ */
+function only(logs, name) {
+  const found = logs.filter((l) => l.eventName === name)
+  assert.equal(found.length, 1, `expected exactly one ${name}, got ${found.length}`)
+  return found[0].args
 }
 
 async function fresh() {
@@ -301,11 +314,15 @@ await check('the event reports the stored state on both dimensions', async () =>
     paymentTx: TX1, amount: 1_000_000n, paymentToken: TOKEN, amountDecimals: 6,
     evidenceHash: ZERO32, observedAt: 0,
   })])
-  const a = r.logs[0].args
+  const a = only(r.logs, 'FeedbackAttested')
   assert.equal(a.evidence, E.Intact)
   assert.equal(a.evidenceHash, EH1)
   assert.equal(a.evidenceObservedAt, 1_789_000_000)
   assert.equal(a.payment, P.Attributed)
+  // …and beside it, what this pass actually claimed. Without both, a value
+  // carried forward and a value re-checked are the same log line.
+  assert.equal(a.statedEvidence, E.Unknown)
+  assert.equal(a.statedPayment, P.Attributed)
 })
 
 console.log('\nthe read surface')
@@ -491,8 +508,7 @@ console.log('\nevents')
 await check('every attestation emits one event carrying the full state', async () => {
   const { chain, addr } = await fresh()
   const r = await chain.call(ATTESTER, addr, 'attest', [attributed({ agentId: 42n, feedbackIndex: 5n })])
-  assert.equal(r.logs.length, 1)
-  const a = r.logs[0].args
+  const a = only(r.logs, 'FeedbackAttested')
   assert.equal(a.agentId, 42n)
   assert.equal(a.clientAddress.toLowerCase(), REVIEWER)
   assert.equal(a.feedbackIndex, 5n)
@@ -503,8 +519,18 @@ await check('every attestation emits one event carrying the full state', async (
   assert.equal(a.evidenceHash, EH1)
   assert.equal(a.amount, 1_000_000n)
   assert.equal(a.paymentToken.toLowerCase(), TOKEN)
-  assert.equal(a.amountDecimals, 6)
   assert.equal(a.revision, 1)
+
+  // The payment payload the main event no longer carries is carried in full
+  // by the event that fires exactly when it can change.
+  const pa = only(r.logs, 'PaymentAttested')
+  assert.equal(pa.agentId, 42n)
+  assert.equal(pa.feedbackIndex, 5n)
+  assert.equal(pa.payment, P.Attributed)
+  assert.equal(pa.paymentTx, TX1)
+  assert.equal(pa.amount, 1_000_000n)
+  assert.equal(pa.paymentToken.toLowerCase(), TOKEN)
+  assert.equal(pa.amountDecimals, 6)
 })
 
 await check('a batch emits one event per element, so history stays reconstructable', async () => {
@@ -516,8 +542,12 @@ await check('a batch emits one event per element, so history stays reconstructab
   ]
   const r = await chain.call(ATTESTER, addr, 'attestBatch', [batch])
   assert.equal(r.reverted, false)
-  assert.equal(r.logs.length, 3)
-  assert.deepEqual(r.logs.map((l) => l.args.agentId), [1n, 2n, 3n])
+  const attested = r.logs.filter((l) => l.eventName === 'FeedbackAttested')
+  assert.equal(attested.length, 3)
+  assert.deepEqual(attested.map((l) => l.args.agentId), [1n, 2n, 3n])
+  // Only the third claim states a payment, so only it gets the second event.
+  const payments = r.logs.filter((l) => l.eventName === 'PaymentAttested')
+  assert.deepEqual(payments.map((l) => l.args.agentId), [3n])
   assert.equal((await chain.call(STRANGER, addr, 'totalAttestations', [])).result, 3n)
 })
 
@@ -529,14 +559,19 @@ await check('the sticky payment state is what the event reports, not the blank i
   const r = await chain.call(ATTESTER, addr, 'attest', [claim({
     verdict: V.EvidenceUnreachable, evidence: E.Unreachable, payment: P.Unknown,
   })])
-  assert.equal(r.logs[0].args.paymentTx, TX1)
-  assert.equal(r.logs[0].args.amount, 1_000_000n)
+  const a = only(r.logs, 'FeedbackAttested')
+  assert.equal(a.paymentTx, TX1)
+  assert.equal(a.amount, 1_000_000n)
   // The field itself, not only its payload: the event used to echo the caller's
   // blank `Unknown` while the mapping kept `Attributed`, so an indexer
   // rebuilding state from events alone disagreed with a direct reader.
-  assert.equal(r.logs[0].args.payment, P.Attributed)
-  assert.equal(r.logs[0].args.paymentToken.toLowerCase(), TOKEN)
-  assert.equal(r.logs[0].args.amountDecimals, 6)
+  assert.equal(a.payment, P.Attributed)
+  assert.equal(a.paymentToken.toLowerCase(), TOKEN)
+  // And the pass is legible as what it was: a documentary re-check that left
+  // the payment alone. A carry-forward must not look like a re-verification.
+  assert.equal(a.statedPayment, P.Unknown)
+  assert.equal(a.statedEvidence, E.Unreachable)
+  assert.equal(r.logs.filter((l) => l.eventName === 'PaymentAttested').length, 0)
 })
 
 console.log('\nbatching')
@@ -834,6 +869,124 @@ await check('the frozen v2 source still compiles, so the live deployment stays v
   assert.match(out, /compiled: ProvenanceAttestations/)
   // Restore the v3 artifacts the rest of the suite and the deploy script use.
   execFileSync('node', ['script/compile.mjs'], { encoding: 'utf8' })
+})
+
+console.log('\ndeclaring nothing is a finding, not a silence')
+
+await check('a document that declares no payment is distinguishable from one nobody read', async () => {
+  /**
+   * Three states used to share one stored zero: "no pass has evaluated the
+   * payment", "the claim was malformed or on a chain we do not query", and
+   * "the file declares no payment at all". A consumer separating reviews that
+   * claim a payment from reviews that do not therefore put a fraudulent claim
+   * in the same bucket as an honest review that never made one — which is the
+   * exact population this ledger exists to name.
+   */
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    agentId: 1n, feedbackIndex: 0n, payment: P.NotDeclared,
+  })])
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    agentId: 2n, feedbackIndex: 1n, payment: P.Unknown,
+  })])
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    agentId: 3n, feedbackIndex: 2n, verdict: V.PaymentTxNotFound, payment: P.NotFound,
+    evidence: E.Unknown, evidenceHash: ZERO32,
+  })])
+
+  assert.equal((await chain.call(STRANGER, addr, 'paymentOf', [1n, REVIEWER, 0n])).result, P.NotDeclared)
+  assert.equal((await chain.call(STRANGER, addr, 'paymentOf', [2n, REVIEWER, 1n])).result, P.Unknown)
+  assert.equal((await chain.call(STRANGER, addr, 'paymentOf', [3n, REVIEWER, 2n])).result, P.NotFound)
+  // All three still read 0x0 for paymentTx — which is precisely why the rung,
+  // not the hash, has to be what a consumer sorts on.
+  for (const [id, idx] of [[1n, 0n], [2n, 1n], [3n, 2n]]) {
+    const a = (await chain.call(STRANGER, addr, 'getAttestation', [id, REVIEWER, idx])).result
+    assert.equal(a.paymentTx, ZERO32)
+  }
+})
+
+await check('NotDeclared cannot arrive carrying the payment it denies', async () => {
+  const { chain, addr } = await fresh()
+  for (const over of [
+    { paymentTx: TX1 },
+    { amount: 5n, paymentToken: TOKEN },
+    { paymentToken: TOKEN },
+  ]) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [claim({ payment: P.NotDeclared, ...over })])
+    assert.equal(r.selector, ERRORS.IncoherentAmount, `accepted ${JSON.stringify(over, (k, v) => typeof v === 'bigint' ? String(v) : v)}`)
+  }
+  // …and it cannot sit under a headline that names a payment outcome either.
+  const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.PaymentTxNotFound, evidence: E.Unknown, payment: P.NotDeclared, evidenceHash: ZERO32,
+  })])
+  assert.equal(r.selector, ERRORS.DimensionMismatch)
+})
+
+await check('a finding overwrites, and only a silence is carried forward', async () => {
+  // NotDeclared is a claim about the document, so unlike Unknown it must
+  // replace what is stored. Getting this backwards would let a later pass
+  // erase an attributed payment by simply not finding it in a changed file —
+  // or, the other way, freeze a record at a value nobody re-checked.
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [attributed()])
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributed', [1n, REVIEWER, 0n])).result, true)
+
+  await chain.call(ATTESTER, addr, 'attest', [claim({ payment: P.Unknown })])
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributed', [1n, REVIEWER, 0n])).result, true,
+    'a pass that did not look must not withdraw a published finding')
+
+  await chain.call(ATTESTER, addr, 'attest', [claim({ payment: P.NotDeclared })])
+  assert.equal((await chain.call(STRANGER, addr, 'paymentOf', [1n, REVIEWER, 0n])).result, P.NotDeclared,
+    'a pass that read the file and found no claim must be recorded')
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributed', [1n, REVIEWER, 0n])).result, false)
+})
+
+console.log('\nthe log is the history')
+
+await check('a payment pass is subscribable by its rung, and its absence is information', async () => {
+  /**
+   * FeedbackAttested indexes `verdict`, a merged headline. Since the two
+   * dimensions separated, the honest pipeline routinely writes an attributed
+   * payment under a documentary verdict — so an integrator filtering verdict
+   * topics for attributed payments and one calling isPaymentAttributed get
+   * different sets from the same chain, with nothing signalling the divergence.
+   */
+  const { chain, addr } = await fresh()
+  const paid = await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceIntact, evidence: E.Intact, payment: P.Attributed,
+    paymentTx: TX1, amount: 7n, paymentToken: TOKEN, amountDecimals: 6,
+  })])
+  const pa = only(paid.logs, 'PaymentAttested')
+  assert.equal(pa.payment, P.Attributed)
+  assert.equal(only(paid.logs, 'FeedbackAttested').verdict, V.EvidenceIntact,
+    'the headline says nothing about the payment — which is the whole point')
+
+  // A pass that did not look at the payment emits no payment event at all, so
+  // "when was this last verified" is answerable from the log alone.
+  const carried = await chain.call(ATTESTER, addr, 'attest', [claim({ payment: P.Unknown })])
+  assert.equal(carried.logs.filter((l) => l.eventName === 'PaymentAttested').length, 0)
+  assert.equal(only(carried.logs, 'FeedbackAttested').payment, P.Attributed,
+    'the merged state is still reported, so a replaying indexer stays correct')
+  assert.equal(only(carried.logs, 'FeedbackAttested').statedPayment, P.Unknown,
+    'and the claim is reported beside it, so a carry-forward is not a re-check')
+})
+
+console.log('\nreading an empty coverage history')
+
+await check('a service that never stated its coverage says so, without looking broken', async () => {
+  // `_sweeps[length - 1]` on an empty array reverts Panic(0x11) — an arithmetic
+  // underflow, which every convention reads as a contract bug. A legitimate
+  // operating state was indistinguishable from a broken contract.
+  const { chain, addr } = await fresh()
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 0n)
+  assert.equal((await chain.call(STRANGER, addr, 'latestSweep', [])).selector, ERRORS.NoSuchSweep)
+  assert.equal((await chain.call(STRANGER, addr, 'sweepAt', [0n])).selector, ERRORS.NoSuchSweep)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [1n])).result, false)
+
+  await attestMany(chain, addr, 1)
+  await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 1, 1, ZERO32])
+  assert.equal((await chain.call(STRANGER, addr, 'latestSweep', [])).result.fromBlock, 100n)
+  assert.equal((await chain.call(STRANGER, addr, 'sweepAt', [1n])).selector, ERRORS.NoSuchSweep)
 })
 
 console.log(`\n${passed} passed\n`)

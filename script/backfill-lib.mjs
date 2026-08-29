@@ -67,6 +67,7 @@ export const Payment = {
   Failed: 5,
   NotFound: 6,
   ForeignChain: 7,
+  NotDeclared: 8,
 }
 
 export const VERDICT_NAMES = Object.fromEntries(Object.entries(Verdict).map(([k, v]) => [v, k]))
@@ -171,8 +172,29 @@ export function evidenceOf(row) {
 }
 
 /** The payment dimension implied by the row's rung; Unknown when it says nothing. */
+/**
+ * The payment dimension for one row.
+ *
+ * A verdict that names a payment outcome fixes it. For everything else the
+ * question is which of two very different things "no payment state" means, and
+ * the row can answer it: if the file was retrieved and parsed and declares no
+ * payment, that is a finding — `NotDeclared` — not an absence. Leaving it at
+ * `Unknown` put an honest review that claims nothing in the same bucket as a
+ * record nobody has evaluated yet, and, downstream, in the same bucket as the
+ * 76 declared payments that are not on this chain.
+ *
+ * Anything less certain stays `Unknown`. A file we could not read may well
+ * declare a payment; saying it does not would be an accusation built on our
+ * own retrieval failure, which is the mistake this pipeline exists to avoid.
+ */
 export function paymentOf(row, verdict) {
-  return PAYMENT_OF_VERDICT[verdict] ?? Payment.Unknown
+  const implied = PAYMENT_OF_VERDICT[verdict]
+  if (implied !== undefined) return implied
+  const read = row.fetched === 'true' && row.jsonValid === 'true'
+  if (read && row.claimsPayment === 'false' && !(row.claimTxHash ?? '').trim()) {
+    return Payment.NotDeclared
+  }
+  return Payment.Unknown
 }
 
 const WELL_FORMED = /^0x[0-9a-fA-F]{64}$/
@@ -342,8 +364,11 @@ export function buildAttestations(claims, cache) {
 
     const verdict = verdictOf(c)
     const payment = paymentOf(c, verdict)
-    const paymentTx = paymentTxOf(c)
-    const amount = payment === Payment.Unknown ? 0n : amountOf(c)
+    // `NotDeclared` asserts the document names no payment, so it must carry
+    // none — the contract refuses the contradiction and this is where it would
+    // otherwise be discovered, mid-spend, at the 74th batch.
+    const paymentTx = payment === Payment.NotDeclared ? ZERO32 : paymentTxOf(c)
+    const amount = payment === Payment.Unknown || payment === Payment.NotDeclared ? 0n : amountOf(c)
     const token = (c.token ?? '').trim()
     const paymentToken = amount > 0n && ADDRESS.test(token) ? token.toLowerCase() : ZERO_ADDRESS
     const decimals = Number((c.decimals ?? '').trim() || 0)
@@ -437,6 +462,12 @@ export function incoherence({ verdict, evidence, payment, paymentTx, amount, pay
   }
   if (amount > 0n && paymentToken === ZERO_ADDRESS) {
     return 'an amount denominated in no token cannot be compared to a threshold'
+  }
+  // The contract's mirror: a claim that the document names no payment cannot
+  // itself arrive carrying one.
+  if (payment === Payment.NotDeclared &&
+      (paymentTx !== ZERO32 || amount !== 0n || paymentToken !== ZERO_ADDRESS)) {
+    return 'NotDeclared carries a payment: the row contradicts itself'
   }
   return null
 }

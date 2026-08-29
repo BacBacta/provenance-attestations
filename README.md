@@ -54,6 +54,17 @@ cannot carry both — the payment rungs outranked every documentary rung, so for
 every record declaring a payment the state of its file was measured and thrown
 away. They are stored side by side now.
 
+**A silence and a finding are different things.** `Payment.NotDeclared` says
+the file was read and declares no payment at all. Without it, that honest
+review shared one stored zero with "nobody has evaluated this yet" *and* — via
+`paymentTx == 0` — with a claim that was malformed or on a chain this attester
+does not query. So a consumer separating reviews that claim a payment from
+reviews that do not was putting a fabricated claim in the same bucket as a
+review that never made one, which is the exact population the census exists to
+name. Read the `payment` rung, never `paymentTx == 0`. A file that could not be
+retrieved stays `Unknown`: a retrieval failure of ours is not evidence about
+somebody's document.
+
 **Both are sticky.** `Payment.Unknown` and `Evidence.Unknown` mean *this pass
 had nothing to say*, and each leaves that dimension's stored state alone. A
 settled transfer does not stop having happened when its evidence file goes
@@ -123,6 +134,17 @@ verdict about.
 | `isWithinSweep(block)` | did the attester claim to have swept this block? |
 | `sweepCount()` / `sweepAt(i)` / `latestSweep()` | the coverage claims themselves |
 
+**`false` is not a verdict.** Every boolean above returns `false` for a record
+that was never attested, exactly as it does for one checked and found wanting.
+Reading `getAttestation(...).verdict == None` separates them, and `isWithinSweep`
+answers the harder question — whether the attester ever *claimed* to have looked
+at the block that record was written in. A `false` inside a swept range is a
+finding; outside one it is only silence. **This matters right now:** the
+canonical deployment (v3, below) is live and empty, so today every one of these
+calls returns `false` for every address on Celo. Anyone wiring the integration
+in before the backfill lands is filtering out 100% of the registry while
+believing they applied a verified filter.
+
 `isPaymentBacked` is deliberately the weak one. Anyone may cite any real
 transfer on the chain, so it is a signal, not a filter — use
 `isPaymentAttributed` where a payment is meant to be a barrier to entry. And
@@ -130,12 +152,36 @@ because a verified transfer has no floor, the settled `amount` and its token are
 stored, so a consumer can apply its own threshold in the same call rather than
 trusting the rung to imply one.
 
+### Two events, because one could not tell the truth
+
+`FeedbackAttested` fires on every write. It carries the merged state — what a
+reader of the mapping sees — *and* what the pass itself claimed
+(`statedEvidence`, `statedPayment`, `Unknown` meaning it did not look). Both are
+needed: with only the merged values, a re-verification and a value carried
+forward from months ago are the same log line, and the history the stickiness
+rule leans on cannot be reconstructed per dimension.
+
+`PaymentAttested` fires only when a pass actually evaluated the payment, with
+the resulting rung as an indexed topic. That is the subscribable form of the
+strongest claim here. `FeedbackAttested` indexes `verdict`, a merged headline,
+and since the dimensions separated the pipeline routinely writes an attributed
+payment under a documentary verdict — so a consumer filtering `verdict` topics
+for attributed payments gets a different set than `isPaymentAttributed`. Its
+absence is information too: a record written without it had its payment carried
+forward, not re-checked.
+
 Records are keyed by the registry's own tuple `(agentId, clientAddress,
 feedbackIndex)`. Re-attestation is allowed by design — verdicts can change (a
 file dies later, a transaction appears later) — and bumps a `revision` counter;
-prior states remain in the immutable event history. `checkedAt` is the block
-that recorded the verdict; `observedAt` is when the check actually ran, which
-for a backfill is days earlier.
+prior states remain in the immutable event history.
+
+`revision` and `totalAttestations` count **writes**, not verifications, and are
+documented as such. Either dimension may arrive as `Unknown`, so a record can be
+written ten times with its payment examined once, and a rewrite identical to the
+stored state is accepted and counted. The honest per-record answer to "when was
+this last actually checked" is `evidenceObservedAt` / `paymentObservedAt`, which
+only a pass that looked can move. `checkedAt` is the block that recorded the
+write — a liveness signal, and nothing more.
 
 **Trust model, stated plainly:** verdicts are written by a single accountable
 attester, rotatable by the owner. This is honest centralization: the attestation
@@ -157,7 +203,7 @@ npm install
 npm test        # compiles, then runs the suite on a real in-process EVM
 ```
 
-No framework: `solc` compiles, `@ethereumjs/vm` executes. 100 tests across
+No framework: `solc` compiles, `@ethereumjs/vm` executes. 105 tests across
 three suites:
 
 - **contract** — authorization, the two-step handover, overwrite semantics, the
@@ -172,12 +218,13 @@ three suites:
   a real EVM, including a hostile `feedbackURI` that tries to forge an
   attestation at every layer.
 
-Measured on the harness: a 100-row batch of documentary verdicts costs 6.09M
-gas (~61k per attestation, up from ~51k in v2 — the extra slot carries the
-settled amount, its token and now a separate observation date per dimension). A
-row carrying an attributed payment costs ~103k, because it writes a transaction
-hash and a full amount/token slot as well. `commitSweep` is ~71k. The full
-historical backfill still fits in a few transactions for cents.
+Measured on the harness: a 100-row batch of documentary verdicts costs 6.16M
+gas (~62k per attestation, up from ~51k in v2 — the extra slot carries the
+settled amount, its token and a separate observation date per dimension). A row
+carrying an attributed payment costs ~109k, because it writes a transaction
+hash, a full amount/token slot and the second event as well. `commitSweep` is
+~71k, and `isWithinSweep` 7,960 gas at a thousand sweeps. The full historical
+backfill still fits in a few transactions for cents.
 
 The sources of **every deployment that is still on chain** are frozen under
 `contracts/deployed/`, and a test rebuilds each one, so an address stays

@@ -138,14 +138,29 @@ contract ProvenanceAttestations {
         NoValue,       // 4
         Failed,        // 5
         NotFound,      // 6
-        ForeignChain   // 7
+        ForeignChain,  // 7
+        /**
+         * 8 — the file was read, and it declares no payment at all.
+         *
+         * Appended, not inserted: 0–7 are published under v3 and keep their
+         * meanings. Without this value "we did not look" and "we looked and
+         * there was nothing to look at" were the same stored zero, and a
+         * consumer separating reviews that claim a payment from reviews that
+         * do not put both in the same bucket — including the 76 declared
+         * payments that do not exist on this chain, which is the exact
+         * population this ledger was built to name.
+         *
+         * It is a finding, not an absence, so it is NOT sticky: it overwrites,
+         * and it is only writable by a pass that actually read the document.
+         */
+        NotDeclared
     }
 
     struct Attestation {
         Verdict verdict;       // headline rung of the latest check
         Evidence evidence;     // documentary dimension
         Payment payment;       // payment dimension (sticky — see {Payment})
-        uint32 revision;       // number of times this record has been attested
+        uint32 revision;       // number of WRITES to this record — see below
         uint8 amountDecimals;  // decimals of `amount`, from the token
         uint40 checkedAt;      // block.timestamp of the latest write, any dimension
         /**
@@ -159,7 +174,22 @@ contract ProvenanceAttestations {
          */
         uint40 evidenceObservedAt;
         uint40 paymentObservedAt;
-        bytes32 paymentTx;     // declared payment tx hash (0x0 when none was declared)
+        /**
+         * The transaction this payment verdict is ABOUT — not a transcript of
+         * what the file declared.
+         *
+         * It is written only by a pass that states the payment dimension, so
+         * the hash and the verdict about it can never drift apart. The cost of
+         * that pairing is that `paymentTx == 0` carries three distinct
+         * meanings: no pass has evaluated the payment yet, or the claim was
+         * malformed or on a chain this attester does not query (`NotFound`,
+         * `ForeignChain`, which are exempt from carrying a hash), or the file
+         * declares no payment at all. Read `payment` to tell them apart —
+         * `Unknown`, one of those two rungs, and `NotDeclared` respectively.
+         * Sorting on `paymentTx == 0` alone puts a fraudulent claim in the same
+         * bucket as an honest review that never made one.
+         */
+        bytes32 paymentTx;
         bytes32 evidenceHash;  // the registry's own feedbackHash, for cross-reference
         uint96 amount;         // settled amount in token base units; 0 when unknown
         address paymentToken;  // token the amount is denominated in
@@ -228,8 +258,16 @@ contract ProvenanceAttestations {
     ///      Prior revisions stay fully reconstructable from event history.
     mapping(bytes32 => Attestation) private _attestations;
 
-    /// @notice Total attestation writes, including re-attestations. Cheap
-    ///         liveness signal for anyone watching the service.
+    /// @notice Total attestation WRITES, including re-attestations and writes
+    ///         that changed nothing.
+    /// @dev    Not a count of verifications, and deliberately not presented as
+    ///         one. Either dimension may arrive as `Unknown`, so a record can
+    ///         be written ten times with its payment examined once; a rewrite
+    ///         identical to the stored state is accepted and counted too.
+    ///         Treat it as "the service is still writing", never as "this much
+    ///         work was done". The honest per-record answer to "when was this
+    ///         last actually checked" is `evidenceObservedAt` /
+    ///         `paymentObservedAt`, which only a pass that looked can move.
     uint256 public totalAttestations;
 
     /// @notice Every coverage claim ever published, oldest first. Append-only:
@@ -247,9 +285,32 @@ contract ProvenanceAttestations {
 
     /// @notice Emitted on every attestation, including re-attestations.
     /// @dev    Mirrors the registry's own (agentId, clientAddress, feedbackIndex)
-    ///         keying so indexers can join without holding state. `verdict` is
-    ///         indexed so a consumer can subscribe to one rung — "tell me about
-    ///         attributed payments" — without filtering the whole stream.
+    ///         keying so indexers can join without holding state.
+    ///
+    ///         `evidence` and `payment` are the STORED state after the sticky
+    ///         merge, so an indexer replaying the log arrives at what a reader
+    ///         of the mapping sees. `statedEvidence` and `statedPayment` are
+    ///         what this pass actually claimed, `Unknown` meaning it did not
+    ///         look. Both are needed and neither can be derived from the other:
+    ///         with only the merged values, a re-verification and a value
+    ///         carried forward from months ago are the same log line, and the
+    ///         history the stickiness rule leans on ("history lives in events")
+    ///         cannot be reconstructed per dimension.
+    ///
+    ///         `verdict` is indexed because it is the headline of the pass. It
+    ///         is NOT the answer to "is this payment attributed" — that lives
+    ///         in `payment`, which is sticky while `verdict` is overwritten
+    ///         every pass, so the honest pipeline routinely emits an attributed
+    ///         payment under a documentary verdict. Subscribe to
+    ///         {PaymentAttested} for that question; filtering `verdict` topics
+    ///         for it returns a different set than {isPaymentAttributed}.
+    ///
+    ///         `amountDecimals` and `paymentObservedAt` are deliberately not
+    ///         here. Both belong to the payment dimension, both can only change
+    ///         in a pass that states it, and {PaymentAttested} carries them in
+    ///         full on exactly those passes — so an indexer consuming both
+    ///         events reconstructs everything, and this one stays inside the
+    ///         stack the compiler will give a single emit.
     event FeedbackAttested(
         uint256 indexed agentId,
         address indexed clientAddress,
@@ -257,14 +318,36 @@ contract ProvenanceAttestations {
         uint64 feedbackIndex,
         Evidence evidence,
         Payment payment,
+        Evidence statedEvidence,
+        Payment statedPayment,
         bytes32 paymentTx,
         bytes32 evidenceHash,
         uint96 amount,
         address paymentToken,
-        uint8 amountDecimals,
         uint40 evidenceObservedAt,
-        uint40 paymentObservedAt,
         uint32 revision
+    );
+
+    /// @notice Emitted only by a pass that actually evaluated the payment
+    ///         dimension, with the resulting rung as a topic.
+    /// @dev    The subscribable form of the strongest claim this contract
+    ///         makes. {FeedbackAttested} indexes `verdict`, which is a merged
+    ///         headline: a consumer filtering it for attributed payments
+    ///         silently misses every record whose payment was attributed under
+    ///         a documentary verdict, and that is the common case in the
+    ///         pipeline that writes here. Its absence is also information —
+    ///         a record written without it had its payment carried forward,
+    ///         not re-checked.
+    event PaymentAttested(
+        uint256 indexed agentId,
+        address indexed clientAddress,
+        Payment indexed payment,
+        uint64 feedbackIndex,
+        bytes32 paymentTx,
+        uint96 amount,
+        address paymentToken,
+        uint8 amountDecimals,
+        uint40 observedAt
     );
 
     /// @notice Emitted when the attester publishes what a sweep covered.
@@ -411,15 +494,32 @@ contract ProvenanceAttestations {
             c.feedbackIndex,
             a.evidence,
             a.payment,
+            c.evidence,
+            c.payment,
             a.paymentTx,
             a.evidenceHash,
             a.amount,
             a.paymentToken,
-            a.amountDecimals,
             a.evidenceObservedAt,
-            a.paymentObservedAt,
             a.revision
         );
+
+        // After the record's own event, never before it: an indexer reading the
+        // log in order sees the attestation, then the payment detail that
+        // belongs to it, rather than a detail for a record it has not met.
+        if (c.payment != Payment.Unknown) {
+            emit PaymentAttested(
+                c.agentId,
+                c.clientAddress,
+                c.payment,
+                c.feedbackIndex,
+                c.paymentTx,
+                c.amount,
+                c.paymentToken,
+                c.amountDecimals,
+                c.observedAt
+            );
+        }
     }
 
     /// @notice Batch form of {attest}, for backfills and periodic sweeps.
@@ -486,6 +586,19 @@ contract ProvenanceAttestations {
             c.verdict == Verdict.PaymentTxNotFound ||
             c.verdict == Verdict.PaymentForeignChain
         )) revert IncoherentAmount();
+        /**
+         * `NotDeclared` is the claim that the document names no payment. It
+         * therefore cannot arrive carrying one: a hash, an amount or a token
+         * beside it would be the record contradicting itself in the same
+         * write, and a consumer reading `paymentTx` next to it would be told
+         * two incompatible things. It also cannot sit under a headline that
+         * names a payment outcome — `_impliedPayment` already refuses that,
+         * and this is the other half of the same rule.
+         */
+        if (c.payment == Payment.NotDeclared && (
+            c.paymentTx != bytes32(0) || c.amount != 0 || c.paymentToken != address(0)
+        )) revert IncoherentAmount();
+
         // An amount denominated in nothing cannot be compared to a threshold,
         // which is the only reason to publish it.
         if (c.amount != 0 && c.paymentToken == address(0)) revert IncoherentAmount();
@@ -608,14 +721,22 @@ contract ProvenanceAttestations {
     }
 
     /// @notice One coverage claim.
+    /// @dev    Reverts `NoSuchSweep` past the end rather than on a bare array
+    ///         bounds panic, for the same reason as {latestSweep}.
     function sweepAt(uint256 index) external view returns (Sweep memory) {
+        if (index >= _sweeps.length) revert NoSuchSweep();
         return _sweeps[index];
     }
 
-    /// @notice The most recent coverage claim. Reverts when none exists —
-    ///         a service that has never stated its coverage should read as
-    ///         having never stated it, not as having covered nothing.
+    /// @notice The most recent coverage claim. Reverts `NoSuchSweep` when none
+    ///         exists — a service that has never stated its coverage should
+    ///         read as having never stated it, not as having covered nothing.
+    /// @dev    The named error matters. `_sweeps[_sweeps.length - 1]` on an
+    ///         empty array reverts with Panic(0x11), an arithmetic underflow,
+    ///         which every convention treats as a contract bug: a legitimate
+    ///         operating state was indistinguishable from a broken contract.
     function latestSweep() external view returns (Sweep memory) {
+        if (_sweeps.length == 0) revert NoSuchSweep();
         return _sweeps[_sweeps.length - 1];
     }
 

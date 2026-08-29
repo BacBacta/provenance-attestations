@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs'
 import { newChain, ERRORS } from './harness.mjs'
 import { escapeCell } from '../script/csv.mjs'
 import {
-  parseClaimsCsvStrict, buildAttestations, toClaimStruct, chunk, fingerprint, Verdict,
+  parseClaimsCsvStrict, buildAttestations, toClaimStruct, chunk, fingerprint, Verdict, Payment,
 } from '../script/backfill-lib.mjs'
 
 const OWNER    = '0x00000000000000000000000000000000000000a1'
@@ -132,7 +132,21 @@ await check('a full ladder round-trips from the audit\'s writer to on-chain stat
   const { chain, addr } = await fresh()
   const r = await chain.call(ATTESTER, addr, 'attestBatch', [rows.map(toClaimStruct)])
   assert.equal(r.reverted, false, `batch reverted with ${r.selector}`)
-  assert.equal(r.logs.length, 4)
+  assert.equal(r.logs.filter((l) => l.eventName === 'FeedbackAttested').length, 4)
+  /**
+   * The payment event fires for every pass that actually STATED the payment
+   * dimension, which is two rows here and not one: index 3 attributes a
+   * payment, and index 0 is a file that was read and declares none — a
+   * finding, not a silence. The two rows whose file could not be read stay
+   * Unknown, because a retrieval failure is our problem and never evidence
+   * about what somebody's document says.
+   */
+  const paidLogs = r.logs.filter((l) => l.eventName === 'PaymentAttested')
+  assert.deepEqual(paidLogs.map((l) => l.args.feedbackIndex), [0n, 3n])
+  assert.deepEqual(paidLogs.map((l) => l.args.payment), [Payment.NotDeclared, Payment.Attributed])
+  // A NotDeclared row must reach the chain carrying nothing.
+  assert.equal(paidLogs[0].args.paymentTx, '0x' + '00'.repeat(32))
+  assert.equal(paidLogs[0].args.amount, 0n)
 
   // The strong rung survives the whole path, amount and all.
   const paid = (await chain.call(STRANGER, addr, 'getAttestation', [9742n, REVIEWER, 3n])).result
@@ -184,7 +198,10 @@ await check('a hostile feedbackURI cannot forge an attestation anywhere along th
   const { chain, addr } = await fresh()
   const r = await chain.call(ATTESTER, addr, 'attestBatch', [rows.map(toClaimStruct)])
   assert.equal(r.reverted, false)
-  assert.equal(r.logs.length, 1, 'exactly one attestation reached the chain')
+  assert.equal(
+    r.logs.filter((l) => l.eventName === 'FeedbackAttested').length, 1,
+    'exactly one attestation reached the chain',
+  )
   // The agent the forged row named was never touched.
   const victim = (await chain.call(STRANGER, addr, 'getAttestation', [9999n, '0xdead00000000000000000000000000000000dead', 0n])).result
   assert.equal(victim.verdict, 0, 'the forged record stays "never attested"')
@@ -233,7 +250,7 @@ await check('a claim the library accepts is a claim the contract accepts', async
 
   const r = await chain.call(ATTESTER, addr, 'attestBatch', [rows.map(toClaimStruct)])
   assert.equal(r.reverted, false, `contract rejected a claim the library built: ${r.selector}`)
-  assert.equal(r.logs.length, shapes.length)
+  assert.equal(r.logs.filter((l) => l.eventName === 'FeedbackAttested').length, shapes.length)
 })
 
 await check('a library-rejected claim is one the contract would have refused too', async () => {
