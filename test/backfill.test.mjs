@@ -10,9 +10,10 @@ import { readFileSync } from 'node:fs'
 import {
   parseClaimsCsv, parseClaimsCsvStrict, verdictOf, evidenceOf, paymentOf, paymentTxOf,
   indexCache, buildAttestations, incoherence, fingerprint, amountOf, observedAtOf,
-  parseUint, parseAddress, Verdict, Evidence, Payment, chunk,
+  parseUint, parseAddress, Verdict, Evidence, Payment, chunk, recordKey, merkleRoot,
 } from '../script/backfill-lib.mjs'
 import { escapeCell, parseCsvStrict } from '../script/csv.mjs'
+import { keccak256 } from 'viem'
 
 let passed = 0
 function check(name, fn) {
@@ -403,6 +404,43 @@ check('a control character in a URI no longer collapses two records into one', (
 
 check('chunking splits without losing rows', () => {
   assert.deepEqual(chunk([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]])
+})
+
+console.log('\ncoverage — the claim about what was NOT written')
+
+check('the off-chain record key is the contract\'s own key', () => {
+  // A leaf in the coverage tree must be the value the ledger indexes by, or a
+  // proof needs a translation layer and stops being checkable with stock tools.
+  const k = recordKey(7, AAA, 3)
+  assert.match(k, /^0x[0-9a-f]{64}$/)
+  assert.equal(k, recordKey(7n, AAA.toUpperCase().replace('0X', '0x'), 3n), 'case and type must not matter')
+  assert.notEqual(k, recordKey(7, AAA, 4))
+})
+
+check('the root depends on the set, not on the order it was processed in', () => {
+  const ks = [recordKey(1, AAA, 0), recordKey(1, AAA, 1), recordKey(2, BBB, 0)]
+  const r = merkleRoot(ks)
+  assert.equal(merkleRoot([ks[2], ks[0], ks[1]]), r)
+  assert.equal(merkleRoot([...ks, ks[0]]), r, 'a repeated leaf is one member of a set')
+  assert.notEqual(merkleRoot(ks.slice(0, 2)), r)
+})
+
+check('an empty sweep commits to zero, which reads as "nothing claimed"', () => {
+  assert.equal(merkleRoot([]), ZERO32)
+})
+
+check('an odd leaf is carried up, never duplicated', () => {
+  /**
+   * Duplicating the odd node is a real Merkle footgun: it lets one leaf appear
+   * twice in the tree, so a proof for it can be replayed at a second position.
+   * Checked against both constructions rather than against itself.
+   */
+  const leaves = [recordKey(1, AAA, 0), recordKey(1, AAA, 1), recordKey(1, AAA, 2)].sort()
+  const h = (x, y) => keccak256(('0x' + (x < y ? x.slice(2) + y.slice(2) : y.slice(2) + x.slice(2))))
+  const carried = h(h(leaves[0], leaves[1]), leaves[2])
+  const duplicated = h(h(leaves[0], leaves[1]), h(leaves[2], leaves[2]))
+  assert.notEqual(carried, duplicated, 'the two constructions must actually differ')
+  assert.equal(merkleRoot(leaves), carried)
 })
 
 console.log(`\n${passed} passed\n`)

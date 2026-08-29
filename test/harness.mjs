@@ -24,13 +24,19 @@ const bytes = (h) => Uint8Array.from(Buffer.from(h.replace(/^0x/, ''), 'hex'))
  * being noted as untestable.
  */
 export const BLOCK_TIMESTAMP = 1_790_000_000n // 2026-09-21, after the audited window
+/**
+ * A block height in the same world as that timestamp. Left at 1, every
+ * realistic block range a test might commit reads as "not yet mined", which
+ * hides the range checks behind a revert that has nothing to do with them.
+ */
+export const BLOCK_NUMBER = 76_100_000n
 
 export async function newChain(timestamp = BLOCK_TIMESTAMP) {
   const common = new Common({ chain: Mainnet, hardfork: Hardfork.Shanghai })
   const vm = await createVM({ common })
   const block = {
     header: {
-      number: 1n,
+      number: BLOCK_NUMBER,
       timestamp,
       cliqueSigner: () => createAddressFromString('0x' + '00'.repeat(20)),
       coinbase: createAddressFromString('0x' + '00'.repeat(20)),
@@ -94,5 +100,7 @@ export const ERRORS = {
   MissingPaymentTx: toFunctionSelector('MissingPaymentTx()'),
   IncoherentAmount: toFunctionSelector('IncoherentAmount()'),
   ObservationInFuture: toFunctionSelector('ObservationInFuture()'),
+  InvalidRange: toFunctionSelector('InvalidRange()'),
+  AttestedExceedsObserved: toFunctionSelector('AttestedExceedsObserved()'),
   DimensionMismatch: toFunctionSelector('DimensionMismatch()'),
 }

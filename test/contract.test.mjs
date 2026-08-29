@@ -565,6 +565,84 @@ await check('a duplicate tuple inside one batch is applied twice, and says so', 
   assert.equal(a.verdict, V.EvidenceUnreachable)
 })
 
+console.log('\ncoverage — what the attester did NOT write')
+
+await check('a sweep publishes what it covered, and only the attester may', async () => {
+  /**
+   * Events prove attestations. They cannot prove that everything which should
+   * have been attested was, so an attester with something to hide never had to
+   * lie — it only had to stay quiet, and silence left no trace. A sweep makes
+   * coverage a dated, attributable, refutable claim.
+   */
+  const { chain, addr } = await fresh()
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 0n)
+
+  const args = [100n, 200n, 5000, 4800, EH1]
+  assert.equal((await chain.call(STRANGER, addr, 'commitSweep', args)).selector, ERRORS.NotAttester)
+  assert.equal((await chain.call(OWNER, addr, 'commitSweep', args)).selector, ERRORS.NotAttester)
+
+  const r = await chain.call(ATTESTER, addr, 'commitSweep', args)
+  assert.equal(r.reverted, false)
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 1n)
+
+  const s = (await chain.call(STRANGER, addr, 'latestSweep', [])).result
+  assert.equal(s.fromBlock, 100n)
+  assert.equal(s.toBlock, 200n)
+  assert.equal(s.observed, 5000)
+  assert.equal(s.attested, 4800)
+  assert.equal(s.recordsRoot, EH1)
+  assert.ok(s.committedAt > 0, 'a claim with no date cannot be aged')
+})
+
+await check('a sweep that contradicts itself is refused', async () => {
+  const { chain, addr } = await fresh()
+  // More attested than observed: the claim refutes itself before anyone checks.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 10, 11, ZERO32])).selector,
+    ERRORS.AttestedExceedsObserved,
+  )
+  // An inverted range, and a range that is not yet mined.
+  assert.equal((await chain.call(ATTESTER, addr, 'commitSweep', [200n, 100n, 1, 1, ZERO32])).selector, ERRORS.InvalidRange)
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'commitSweep', [100n, 99_999_999n, 1, 1, ZERO32])).selector,
+    ERRORS.InvalidRange,
+  )
+})
+
+await check('a gap between observed and attested is published, not hidden', async () => {
+  // The gap is not necessarily wrong — a record can be legitimately out of
+  // scope — but it is now a number somebody can argue with.
+  const { chain, addr } = await fresh()
+  const r = await chain.call(ATTESTER, addr, 'commitSweep', [1n, 50n, 27520, 20097, EH1])
+  assert.equal(r.logs.length, 1)
+  const a = r.logs[0].args
+  assert.equal(a.index, 0n)
+  assert.equal(a.observed, 27520)
+  assert.equal(a.attested, 20097)
+  assert.equal(a.recordsRoot, EH1)
+})
+
+await check('sweeps are append-only, and coverage is queryable by block', async () => {
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 10, 10, ZERO32])
+  await chain.call(ATTESTER, addr, 'commitSweep', [201n, 300n, 20, 18, EH1])
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 2n)
+  assert.equal((await chain.call(STRANGER, addr, 'sweepAt', [0n])).result.toBlock, 200n)
+  assert.equal((await chain.call(STRANGER, addr, 'latestSweep', [])).result.fromBlock, 201n)
+
+  for (const [b, inside] of [[99n, false], [100n, true], [250n, true], [300n, true], [301n, false]]) {
+    assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [b])).result, inside, `block ${b}`)
+  }
+})
+
+await check('a service that never stated its coverage reads as never having stated it', async () => {
+  // Not as having covered nothing: the two are different claims and only one
+  // of them is true.
+  const { chain, addr } = await fresh()
+  assert.equal((await chain.call(STRANGER, addr, 'latestSweep', [])).reverted, true)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [150n])).result, false)
+})
+
 console.log('\nsurface')
 
 await check('the key mirrors the registry tuple exactly', async () => {
@@ -595,6 +673,22 @@ await check('the contract holds no funds and offers no way in', async () => {
   for (const forbidden of ['payable', 'selfdestruct', 'delegatecall', 'call{', 'import ', 'assembly']) {
     assert.ok(!code.includes(forbidden), `contract code should not contain "${forbidden}"`)
   }
+})
+
+await check('every frozen deployment still compiles', async () => {
+  // A repository that cannot rebuild the bytecode of a contract it still has
+  // live has quietly withdrawn it, and falsifiability is the whole premise.
+  const { execFileSync } = await import('node:child_process')
+  const { readdirSync } = await import('node:fs')
+  const frozen = readdirSync('contracts/deployed').filter((f) => f.endsWith('.sol'))
+  assert.ok(frozen.length >= 2, 'v2 and v3 are both live and must both stay buildable')
+  for (const f of frozen) {
+    const out = execFileSync('node', ['script/compile.mjs'], {
+      env: { ...process.env, CONTRACT_SOURCE: `contracts/deployed/${f}` }, encoding: 'utf8',
+    })
+    assert.match(out, /compiled: ProvenanceAttestations/, `${f} failed to compile`)
+  }
+  execFileSync('node', ['script/compile.mjs'], { encoding: 'utf8' }) // restore v4 artifacts
 })
 
 await check('the frozen v2 source still compiles, so the live deployment stays verifiable', async () => {

@@ -21,7 +21,7 @@ import { celo } from 'viem/chains'
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import {
   parseClaimsCsvStrict, indexCache, buildAttestations, chunk,
-  fingerprint, toClaimStruct, VERDICT_NAMES,
+  fingerprint, toClaimStruct, VERDICT_NAMES, recordKey, merkleRoot,
 } from './backfill-lib.mjs'
 
 const DRY = process.env.DRY_RUN !== '0'
@@ -40,6 +40,12 @@ const PROGRESS = process.env.PROGRESS_FILE ?? 'deployments/backfill-progress.jso
  * rather than the default behaviour of a script nobody read.
  */
 const FORCE = process.env.FORCE === '1'
+/**
+ * What the audit says it looked at. Written by the indexer, not derived from
+ * the export: a coverage claim counted from the rows being written would agree
+ * with itself by construction and prove nothing.
+ */
+const SWEEP = process.env.SWEEP_JSON ?? '../celo-agent-feedback-audit/out/sweep.json'
 
 if (!existsSync(CLAIMS)) {
   console.error(`input csv not found at ${CLAIMS} — set CLAIMS_CSV.`)
@@ -342,3 +348,48 @@ for (const [i, part] of allBatches.entries()) {
   writeFileSync(PROGRESS, marker({}))
 }
 console.log(`\nBackfill complete — ${written} of ${rows.length} rows attested.`)
+
+/**
+ * Publish what this sweep covered.
+ *
+ * Events prove what was written; nothing proved that everything which should
+ * have been written was. An attester with something to hide never had to lie,
+ * it only had to stay quiet. The claim below is deliberately unverifiable on
+ * chain — the contract cannot read the registry's history — and that is fine:
+ * its value is that it is precise, dated, attributable and cheap to refute.
+ * Re-index the range, count, rebuild the root, compare.
+ */
+if (written === rows.length) {
+  if (!existsSync(SWEEP)) {
+    console.error(`\nNo coverage manifest at ${SWEEP} — the sweep was NOT committed.`)
+    console.error('Without it the ledger proves what was written and nothing about what was not.')
+    console.error('Re-run the audit to produce out/sweep.json, or set SWEEP_JSON.')
+    process.exit(3)
+  }
+  const sweep = JSON.parse(readFileSync(SWEEP, 'utf8'))
+  const root = merkleRoot(rows.map((r) => recordKey(r.agentId, r.clientAddress, r.feedbackIndex)))
+
+  console.log('\ncoverage claim')
+  console.log(`  blocks    ${sweep.fromBlock}–${sweep.toBlock}`)
+  console.log(`  observed  ${sweep.observed}   (records the indexer saw in range)`)
+  console.log(`  attested  ${rows.length}   (verdicts written by this run)`)
+  console.log(`  root      ${root}`)
+
+  if (rows.length > Number(sweep.observed)) {
+    console.error('\nMore rows attested than records observed. The claim would refute itself;')
+    console.error('the export and the manifest describe different runs. Nothing committed.')
+    process.exit(1)
+  }
+
+  const hash = await wallet.writeContract({
+    address: deployment.address,
+    abi,
+    functionName: 'commitSweep',
+    args: [BigInt(sweep.fromBlock), BigInt(sweep.toBlock), Number(sweep.observed), rows.length, root],
+  })
+  const receipt = await pub.waitForTransactionReceipt({ hash })
+  console.log(`  committed — ${receipt.status} — ${hash}`)
+  if (receipt.status !== 'success') process.exit(1)
+} else {
+  console.log('\nPartial run: no coverage claim committed. A sweep must describe a completed pass.')
+}

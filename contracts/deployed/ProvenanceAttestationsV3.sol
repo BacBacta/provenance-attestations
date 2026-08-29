@@ -1,4 +1,16 @@
 // SPDX-License-Identifier: MIT
+//
+// FROZEN — do not edit.
+//
+// The exact source of the contract live on Celo mainnet at
+// 0xAD6202F635e97f17f193524CCa66B5D288ab6807, verified on Blockscout. Kept
+// verbatim so that deployment stays reproducible from this repository's HEAD
+// after the working contract moved on to v4. A repository that can no longer
+// rebuild the bytecode of its own live contract has quietly withdrawn it, and
+// falsifiability is the whole premise here.
+//
+// Build it with:  CONTRACT_SOURCE=contracts/deployed/ProvenanceAttestationsV3.sol npm run compile
+//
 pragma solidity 0.8.28;
 
 /// @title  ProvenanceAttestations
@@ -52,25 +64,6 @@ pragma solidity 0.8.28;
 ///         be told apart from a dust transfer without an off-chain lookup; and
 ///         `observedAt`, because `checkedAt` is the block that recorded the
 ///         verdict, which for a backfill is days after the observation.
-///
-/// @dev    WHAT CHANGED FROM v3
-///         v3 could prove what it had written and nothing about what it had
-///         not. Events prove attestations; they cannot prove that everything
-///         which should have been attested was — so an attester with something
-///         to hide never had to lie, it only had to stay quiet, and silence
-///         left no trace anywhere.
-///
-///         {commitSweep} closes that by making coverage a published claim
-///         rather than an assumption. The scope of a sweep is deterministic —
-///         every NewFeedback event the registry emitted in a block range — so
-///         anyone can re-index the same range, count, and rebuild the same
-///         Merkle root over the record keys. A count that does not match is
-///         proof of omission; the root proves *which* records, via an ordinary
-///         inclusion proof, without this contract having to store them.
-///
-///         This does not prevent censorship. It converts it from invisible into
-///         falsifiable, which is the same standard this service applies to
-///         every verdict it publishes about somebody else.
 ///
 /// @dev    TRUST MODEL, STATED PLAINLY
 ///         Verdicts are written by a single accountable attester, rotatable by
@@ -175,23 +168,6 @@ contract ProvenanceAttestations {
         uint40 observedAt;
     }
 
-    /// @notice One attester's published claim about what it covered.
-    /// @dev    `observed` is what the attester says the registry emitted in the
-    ///         range; `attested` is how many of those it wrote verdicts for. The
-    ///         gap is not necessarily wrong — a record may legitimately be out
-    ///         of scope — but it is now a number somebody can argue with.
-    struct Sweep {
-        uint64 fromBlock;
-        uint64 toBlock;
-        uint32 observed;
-        uint32 attested;
-        uint40 committedAt;
-        /// @dev Merkle root over the sorted {key} of every record observed.
-        ///      bytes32(0) means the attester published counts without a root,
-        ///      which is a weaker claim and readable as such.
-        bytes32 recordsRoot;
-    }
-
     // ---------------------------------------------------------------- state
 
     address public owner;
@@ -207,12 +183,8 @@ contract ProvenanceAttestations {
     ///         liveness signal for anyone watching the service.
     uint256 public totalAttestations;
 
-    /// @notice Every coverage claim ever published, oldest first. Append-only:
-    ///         a sweep cannot be withdrawn, only followed by another.
-    Sweep[] private _sweeps;
-
     /// @notice Contract revision, for consumers that read across deployments.
-    string public constant VERSION = "4.0.0";
+    string public constant VERSION = "3.0.0";
 
     // ---------------------------------------------------------------- events
 
@@ -241,16 +213,6 @@ contract ProvenanceAttestations {
         uint32 revision
     );
 
-    /// @notice Emitted when the attester publishes what a sweep covered.
-    event SweepCommitted(
-        uint256 indexed index,
-        uint64 fromBlock,
-        uint64 toBlock,
-        uint32 observed,
-        uint32 attested,
-        bytes32 recordsRoot
-    );
-
     // ---------------------------------------------------------------- errors
 
     error NotOwner();
@@ -265,10 +227,6 @@ contract ProvenanceAttestations {
     error IncoherentAmount();
     /// @dev An observation timestamped after the block that records it.
     error ObservationInFuture();
-    /// @dev A sweep whose range is empty, inverted, or not yet mined.
-    error InvalidRange();
-    /// @dev More records attested than were observed: the claim refutes itself.
-    error AttestedExceedsObserved();
     /// @dev The headline verdict and the payment dimension name different outcomes.
     error DimensionMismatch();
 
@@ -483,71 +441,7 @@ contract ProvenanceAttestations {
                p == Payment.NoValue;
     }
 
-    /// @notice Publish what a sweep covered, so omission becomes falsifiable.
-    /// @param  fromBlock   first block of the range the attester examined
-    /// @param  toBlock     last block, inclusive; must already be mined
-    /// @param  observed    NewFeedback events the attester saw in that range
-    /// @param  attested    how many of those it wrote a verdict for
-    /// @param  recordsRoot Merkle root over the sorted `key(...)` of every
-    ///                     observed record, or zero to claim counts only
-    /// @dev    Deliberately unverifiable on chain: this contract cannot read the
-    ///         registry's history, and pretending to check would be theatre. The
-    ///         claim's value is that it is precise, dated, attributable and
-    ///         cheap to refute — re-index the range and compare. What the
-    ///         contract does enforce is that a sweep cannot contradict itself.
-    function commitSweep(
-        uint64 fromBlock,
-        uint64 toBlock,
-        uint32 observed,
-        uint32 attested,
-        bytes32 recordsRoot
-    ) external onlyAttester {
-        if (toBlock < fromBlock || toBlock >= block.number) revert InvalidRange();
-        if (attested > observed) revert AttestedExceedsObserved();
-
-        _sweeps.push(Sweep({
-            fromBlock: fromBlock,
-            toBlock: toBlock,
-            observed: observed,
-            attested: attested,
-            committedAt: uint40(block.timestamp),
-            recordsRoot: recordsRoot
-        }));
-
-        emit SweepCommitted(_sweeps.length - 1, fromBlock, toBlock, observed, attested, recordsRoot);
-    }
-
     // ----------------------------------------------------------------- read
-
-    /// @notice How many coverage claims have been published.
-    function sweepCount() external view returns (uint256) {
-        return _sweeps.length;
-    }
-
-    /// @notice One coverage claim.
-    function sweepAt(uint256 index) external view returns (Sweep memory) {
-        return _sweeps[index];
-    }
-
-    /// @notice The most recent coverage claim. Reverts when none exists —
-    ///         a service that has never stated its coverage should read as
-    ///         having never stated it, not as having covered nothing.
-    function latestSweep() external view returns (Sweep memory) {
-        return _sweeps[_sweeps.length - 1];
-    }
-
-    /// @notice Is this record inside a range the attester claims to have swept?
-    /// @dev    Answers "was this in scope", not "is this attested" — the two
-    ///         together are what make a `None` meaningful: never attested AND
-    ///         inside a swept range is the attester saying nothing about a
-    ///         record it says it looked at.
-    function isWithinSweep(uint64 blockNumber) external view returns (bool) {
-        uint256 n = _sweeps.length;
-        for (uint256 i = 0; i < n; i++) {
-            if (blockNumber >= _sweeps[i].fromBlock && blockNumber <= _sweeps[i].toBlock) return true;
-        }
-        return false;
-    }
 
     /// @notice Canonical storage key, mirroring the ERC-8004 registry's tuple.
     function key(uint256 agentId, address clientAddress, uint64 feedbackIndex)
