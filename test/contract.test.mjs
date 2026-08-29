@@ -154,7 +154,8 @@ await check('a verdict is stored and readable exactly as written', async () => {
   assert.equal(a.amount, 1_000_000n)
   assert.equal(a.paymentToken.toLowerCase(), TOKEN)
   assert.equal(a.amountDecimals, 6)
-  assert.equal(a.observedAt, 1_700_000_000)
+  assert.equal(a.paymentObservedAt, 1_700_000_000, 'the date lands on the dimension that was checked')
+  assert.equal(a.evidenceObservedAt, 1_700_000_000)
   assert.equal(a.revision, 1)
 })
 
@@ -256,7 +257,7 @@ await check('a pass that did not look at the file leaves the file alone', async 
   const a = (await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result
   assert.equal(a.evidence, E.Intact, 'the documentary state survived')
   assert.equal(a.evidenceHash, EH1, 'and so did its cross-reference')
-  assert.equal(a.observedAt, 1_789_000_000, 'and the date of the observation it came from')
+  assert.equal(a.evidenceObservedAt, 1_789_000_000, 'and the date of the observation it came from')
   assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [1n, REVIEWER, 0n])).result, true)
   assert.equal(a.payment, P.Attributed, 'while the payment pass still applied')
 })
@@ -296,7 +297,7 @@ await check('the event reports the stored state on both dimensions', async () =>
   const a = r.logs[0].args
   assert.equal(a.evidence, E.Intact)
   assert.equal(a.evidenceHash, EH1)
-  assert.equal(a.observedAt, 1_789_000_000)
+  assert.equal(a.evidenceObservedAt, 1_789_000_000)
   assert.equal(a.payment, P.Attributed)
 })
 
@@ -641,6 +642,83 @@ await check('a service that never stated its coverage reads as never having stat
   const { chain, addr } = await fresh()
   assert.equal((await chain.call(STRANGER, addr, 'latestSweep', [])).reverted, true)
   assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [150n])).result, false)
+})
+
+await check('a stale dimension keeps its own date, and the fresh one gets the new date', async () => {
+  /**
+   * One shared timestamp could not tell the truth about two dimensions updated
+   * independently: a payment-only sweep refreshed it, so a documentary verdict
+   * nobody had re-examined for months carried today's date and the reader had
+   * no way to tell a fresh answer from a stale one.
+   */
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceIntact, evidence: E.Intact, observedAt: 1_700_000_000,
+  })])
+  await chain.call(ATTESTER, addr, 'attest', [attributed({
+    evidence: E.Unknown, evidenceHash: ZERO32, observedAt: 1_780_000_000,
+  })])
+  const a = (await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result
+  assert.equal(a.evidenceObservedAt, 1_700_000_000, 'the file was last looked at then, and says so')
+  assert.equal(a.paymentObservedAt, 1_780_000_000, 'the payment was looked at now')
+  assert.equal(a.evidence, E.Intact, 'and the stale verdict itself is untouched')
+})
+
+await check('an amount cannot sit beside a rung that says nothing moved', async () => {
+  const { chain, addr } = await fresh()
+  for (const [v, p] of [
+    [V.PaymentNoValue, P.NoValue],
+    [V.PaymentTxNotFound, P.NotFound],
+    [V.PaymentForeignChain, P.ForeignChain],
+  ]) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: v, payment: p, paymentTx: TX1, amount: 500n, paymentToken: TOKEN, amountDecimals: 6,
+    })])
+    assert.equal(r.selector, ERRORS.IncoherentAmount, `verdict ${v} accepted a settled amount`)
+  }
+})
+
+console.log('\ncoverage — cost, not just correctness')
+
+await check('the coverage lookup stays cheap however long the history gets', async () => {
+  /**
+   * A linear scan here cost 2,543 + 2,753 per sweep: eleven thousand junk
+   * sweeps — about five dollars — pushed it past the block gas limit forever,
+   * in a contract with no purge and no proxy. The attester could brick the one
+   * read that incriminates it. Honest operation hit the same wall in fifteen
+   * months.
+   */
+  const { chain, addr } = await fresh()
+  const commit = (i) => chain.call(ATTESTER, addr, 'commitSweep', [BigInt(i * 10), BigInt(i * 10 + 9), 1, 1, ZERO32])
+  // A block outside every range is the worst case: it walks the full depth
+  // rather than stopping early on a hit.
+  const worstCase = async () => (await chain.call(STRANGER, addr, 'isWithinSweep', [9_999_999n])).gasUsed
+
+  for (let i = 0; i < 64; i++) await commit(i)
+  const at64 = await worstCase()
+  for (let i = 64; i < 1024; i++) await commit(i)
+  const at1024 = await worstCase()
+
+  // The answer must still be right at both ends of the range.
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [5n])).result, true)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [10_235n])).result, true)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [9_999_999n])).result, false)
+
+  // Sixteen times the history must not cost sixteen times the gas.
+  assert.ok(at1024 < at64 * 3n, `growth is not logarithmic: ${at64} -> ${at1024}`)
+  assert.ok(at1024 < 60_000n, `a single lookup costs ${at1024} gas`)
+})
+
+await check('sweeps must advance and never overlap', async () => {
+  // The ordering is what makes the binary search correct, so it is enforced
+  // rather than assumed.
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 10, 10, ZERO32])
+  for (const [from, to] of [[100n, 300n], [150n, 400n], [200n, 250n], [50n, 99n]]) {
+    const r = await chain.call(ATTESTER, addr, 'commitSweep', [from, to, 1, 1, ZERO32])
+    assert.equal(r.selector, ERRORS.InvalidRange, `range ${from}-${to} should be refused`)
+  }
+  assert.equal((await chain.call(ATTESTER, addr, 'commitSweep', [201n, 300n, 1, 1, ZERO32])).reverted, false)
 })
 
 console.log('\nsurface')

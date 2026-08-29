@@ -145,10 +145,20 @@ contract ProvenanceAttestations {
         Verdict verdict;       // headline rung of the latest check
         Evidence evidence;     // documentary dimension
         Payment payment;       // payment dimension (sticky — see {Payment})
-        uint40 checkedAt;      // block.timestamp of the latest write
-        uint40 observedAt;     // when the check actually ran; 0 when not stated
         uint32 revision;       // number of times this record has been attested
         uint8 amountDecimals;  // decimals of `amount`, from the token
+        uint40 checkedAt;      // block.timestamp of the latest write, any dimension
+        /**
+         * When each dimension was last ACTUALLY looked at; 0 when never stated.
+         *
+         * One shared date could not tell the truth about two dimensions updated
+         * independently. A payment-only sweep refreshed it, so a documentary
+         * verdict nobody had re-examined for months carried today's date — the
+         * reader had no way to tell a fresh answer from a stale one, which is
+         * the whole reason a verdict carries a date at all.
+         */
+        uint40 evidenceObservedAt;
+        uint40 paymentObservedAt;
         bytes32 paymentTx;     // declared payment tx hash (0x0 when none was declared)
         bytes32 evidenceHash;  // the registry's own feedbackHash, for cross-reference
         uint96 amount;         // settled amount in token base units; 0 when unknown
@@ -186,7 +196,11 @@ contract ProvenanceAttestations {
         uint32 observed;
         uint32 attested;
         uint40 committedAt;
-        /// @dev Merkle root over the sorted {key} of every record observed.
+        /// @dev Merkle root over the sorted {key} of every record OBSERVED in
+        ///      the range — never of the subset that was attested. That is the
+        ///      whole point: a root over what was written proves only what the
+        ///      events already prove, while a root over what was seen is what
+        ///      an omission is measured against.
         ///      bytes32(0) means the attester published counts without a root,
         ///      which is a weaker claim and readable as such.
         bytes32 recordsRoot;
@@ -237,7 +251,8 @@ contract ProvenanceAttestations {
         uint96 amount,
         address paymentToken,
         uint8 amountDecimals,
-        uint40 observedAt,
+        uint40 evidenceObservedAt,
+        uint40 paymentObservedAt,
         uint32 revision
     );
 
@@ -351,6 +366,9 @@ contract ProvenanceAttestations {
             // made a checked record indistinguishable from one whose registry
             // entry attested no hash at all — the basis of EvidenceUnbound.
             a.evidenceHash = c.evidenceHash;
+            // The date travels with the dimension it describes, and only with
+            // it: 0 still means "not stated", so it never overwrites a date.
+            if (c.observedAt != 0) a.evidenceObservedAt = c.observedAt;
         }
         if (c.payment != Payment.Unknown) {
             a.payment = c.payment;
@@ -358,12 +376,12 @@ contract ProvenanceAttestations {
             a.paymentToken = c.paymentToken;
             a.amountDecimals = c.amountDecimals;
             a.paymentTx = c.paymentTx;
+            if (c.observedAt != 0) a.paymentObservedAt = c.observedAt;
         }
+        // The write itself, which is a liveness signal and nothing more: it
+        // says the service touched this record, never that it re-checked what
+        // you are about to read.
         a.checkedAt = uint40(block.timestamp);
-        // 0 means "not stated". Writing it over a known observation date
-        // replaces information with its absence, and re-dates facts this pass
-        // never re-checked.
-        if (c.observedAt != 0) a.observedAt = c.observedAt;
         unchecked { a.revision += 1; }
 
         unchecked { totalAttestations += 1; }
@@ -380,7 +398,8 @@ contract ProvenanceAttestations {
             a.amount,
             a.paymentToken,
             a.amountDecimals,
-            a.observedAt,
+            a.evidenceObservedAt,
+            a.paymentObservedAt,
             a.revision
         );
     }
@@ -438,6 +457,17 @@ contract ProvenanceAttestations {
             (c.verdict == Verdict.PaymentAttributed || c.payment == Payment.Attributed) &&
             c.amount == 0
         ) revert IncoherentAmount();
+        /**
+         * And the mirror of it. A rung saying nothing relevant moved, or that
+         * the transaction was never found, cannot carry a settled amount: a
+         * consumer reading `amount` beside `PaymentNoValue` is being told two
+         * incompatible things by one record.
+         */
+        if (c.amount != 0 && (
+            c.verdict == Verdict.PaymentNoValue ||
+            c.verdict == Verdict.PaymentTxNotFound ||
+            c.verdict == Verdict.PaymentForeignChain
+        )) revert IncoherentAmount();
         // An amount denominated in nothing cannot be compared to a threshold,
         // which is the only reason to publish it.
         if (c.amount != 0 && c.paymentToken == address(0)) revert IncoherentAmount();
@@ -505,6 +535,20 @@ contract ProvenanceAttestations {
         if (toBlock < fromBlock || toBlock >= block.number) revert InvalidRange();
         if (attested > observed) revert AttestedExceedsObserved();
 
+        /**
+         * Ranges must advance and never overlap.
+         *
+         * Without ordering the array is an unordered pile, so asking "was this
+         * block swept" means walking all of it — and the attester alone decides
+         * how long it gets. Eleven thousand junk sweeps cost about five dollars
+         * and pushed that walk past the block gas limit permanently, in a
+         * contract with no purge and no proxy: the attester could brick the one
+         * read that incriminates it, for the price of a coffee. Honest
+         * operation reached the same wall in fifteen months.
+         */
+        uint256 n = _sweeps.length;
+        if (n != 0 && fromBlock <= _sweeps[n - 1].toBlock) revert InvalidRange();
+
         _sweeps.push(Sweep({
             fromBlock: fromBlock,
             toBlock: toBlock,
@@ -542,9 +586,17 @@ contract ProvenanceAttestations {
     ///         inside a swept range is the attester saying nothing about a
     ///         record it says it looked at.
     function isWithinSweep(uint64 blockNumber) external view returns (bool) {
-        uint256 n = _sweeps.length;
-        for (uint256 i = 0; i < n; i++) {
-            if (blockNumber >= _sweeps[i].fromBlock && blockNumber <= _sweeps[i].toBlock) return true;
+        // Binary search, which {commitSweep}'s ordering invariant makes valid.
+        // A linear scan was callable by nobody once the array grew, and the
+        // array is grown by the one party this function holds to account.
+        uint256 lo = 0;
+        uint256 hi = _sweeps.length;
+        while (lo < hi) {
+            uint256 mid = (lo + hi) >> 1;
+            Sweep storage sw = _sweeps[mid];
+            if (blockNumber < sw.fromBlock) hi = mid;
+            else if (blockNumber > sw.toBlock) lo = mid + 1;
+            else return true;
         }
         return false;
     }

@@ -187,24 +187,41 @@ console.log(`attester      ${account.address}`)
  * so every batch reverts — gas burnt, nothing written, and the failure only
  * visible after the first transaction.
  */
-const abiVersion = abi.some((e) => e.type === 'function' && e.name === 'VERSION')
-let onChainVersion = null
-try {
-  onChainVersion = await pub.readContract({ address: deployment.address, abi, functionName: 'VERSION' })
-} catch {
-  onChainVersion = null
+/**
+ * Compare the deployed bytecode with what was compiled, not merely whether the
+ * contract answers VERSION().
+ *
+ * The previous check only asked "does it respond", so a v3 contract answering
+ * "3.0.0" sailed through a v4 run. Successive versions share the attest and
+ * attestBatch selectors, so every batch would land and only the final
+ * commitSweep would revert — after the whole backfill had been paid for, with
+ * the coverage claim, the one thing v4 exists for, silently absent.
+ */
+const localCode = readFileSync('out/ProvenanceAttestations.deployed.bin', 'utf8').trim().toLowerCase()
+const onChainCode = String((await pub.getBytecode({ address: deployment.address })) ?? '')
+  .replace(/^0x/, '').toLowerCase()
+// The trailing metadata hash differs per compilation; the body is what matters.
+const codeBody = (h) => h.slice(0, Math.max(0, h.length - 106))
+if (!onChainCode) {
+  console.error(`\nNo contract at ${deployment.address}.`)
+  process.exit(1)
 }
-if (abiVersion && onChainVersion === null) {
+if (codeBody(onChainCode) !== codeBody(localCode)) {
   console.error(
-    `\nThe contract at ${deployment.address} does not answer VERSION().\n` +
-    `The compiled ABI in out/ is not the ABI of the contract recorded in\n` +
-    `deployments/celo.json — sending this batch would revert on an unknown\n` +
-    `selector and burn the gas. Deploy the current contract, or point\n` +
-    `deployments/celo.json back at the one this ABI belongs to.`,
+    `\nThe contract at ${deployment.address} is not the one compiled in out/.\n` +
+    `  compiled  ${localCode.length / 2} bytes\n` +
+    `  on chain  ${onChainCode.length / 2} bytes\n` +
+    `Versions share the attest selectors, so the batches would land and only the\n` +
+    `coverage claim would fail — after the gas was spent. Deploy the current\n` +
+    `contract, or point deployments/celo.json at the one this build belongs to.`,
   )
   process.exit(1)
 }
-if (onChainVersion) console.log(`version       ${onChainVersion}`)
+let onChainVersion = null
+try {
+  onChainVersion = await pub.readContract({ address: deployment.address, abi, functionName: 'VERSION' })
+} catch { /* a deployment older than VERSION() */ }
+console.log(`version       ${onChainVersion ?? '(none)'}  — bytecode matches out/`)
 
 const onChainAttester = await pub.readContract({ address: deployment.address, abi, functionName: 'attester' })
 if (String(onChainAttester).toLowerCase() !== account.address.toLowerCase()) {
@@ -367,19 +384,36 @@ if (written === rows.length) {
     process.exit(3)
   }
   const sweep = JSON.parse(readFileSync(SWEEP, 'utf8'))
-  const root = merkleRoot(rows.map((r) => recordKey(r.agentId, r.clientAddress, r.feedbackIndex)))
+
+  /**
+   * The root is CARRIED, never rebuilt here.
+   *
+   * It must cover what the indexer OBSERVED — that is the only set an omission
+   * can be measured against. Rebuilding it over the rows this run wrote would
+   * commit to the attested subset, which proves nothing the events do not
+   * already prove, while the contract documents it as covering the observed
+   * set. The claim would then be false in exactly the direction that flatters
+   * the attester.
+   */
+  const root = sweep.observedRoot
+  if (typeof root !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(root)) {
+    console.error(`\n${SWEEP} carries no observedRoot. Re-run the audit: a coverage claim`)
+    console.error('without a root over the observed set cannot locate an omission.')
+    process.exit(3)
+  }
+  // Cross-check that the manifest describes this export: every attested record
+  // must be one the indexer says it saw.
+  if (rows.length > Number(sweep.observed)) {
+    console.error('\nMore rows attested than records observed. The manifest and the export')
+    console.error('describe different runs; nothing committed.')
+    process.exit(1)
+  }
 
   console.log('\ncoverage claim')
   console.log(`  blocks    ${sweep.fromBlock}–${sweep.toBlock}`)
   console.log(`  observed  ${sweep.observed}   (records the indexer saw in range)`)
   console.log(`  attested  ${rows.length}   (verdicts written by this run)`)
-  console.log(`  root      ${root}`)
-
-  if (rows.length > Number(sweep.observed)) {
-    console.error('\nMore rows attested than records observed. The claim would refute itself;')
-    console.error('the export and the manifest describe different runs. Nothing committed.')
-    process.exit(1)
-  }
+  console.log(`  root      ${root}   (over the observed set, from the indexer)`)
 
   const hash = await wallet.writeContract({
     address: deployment.address,

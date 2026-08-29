@@ -151,8 +151,8 @@ await check('a full ladder round-trips from the audit\'s writer to on-chain stat
   assert.equal(busy.verdict, Verdict.EvidenceInconclusive)
 
   // And the observation date is the one the audit recorded, not the write.
-  assert.equal(paid.observedAt, Math.floor(Date.parse('2026-08-20T09:00:00Z') / 1000))
-  assert.ok(paid.checkedAt > paid.observedAt, 'checkedAt is the write, observedAt is the check')
+  assert.equal(paid.paymentObservedAt, Math.floor(Date.parse('2026-08-20T09:00:00Z') / 1000))
+  assert.ok(paid.checkedAt > paid.paymentObservedAt, 'checkedAt is the write, observedAt is the check')
 })
 
 await check('a hostile feedbackURI cannot forge an attestation anywhere along the path', async () => {
