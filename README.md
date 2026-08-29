@@ -157,9 +157,12 @@ that was never attested, exactly as it does for one checked and found wanting.
 Reading `getAttestation(...).verdict == None` separates them, and `isWithinSweep`
 answers the harder question — whether the attester ever *claimed* to have looked
 at the block that record was written in. A `false` inside a swept range is a
-finding; outside one it is only silence. **This matters right now:** the
-canonical deployment (v3, below) is live and empty, so today every one of these
-calls returns `false` for every address on Celo. Anyone wiring the integration
+finding; outside one it is only silence. **This matters right now:** the canonical
+deployment (v3, below) is live and empty, so today the six calls it has all
+return `false` or zero for every address on Celo — and the three added in v4
+(`coverage`, `isWithinSweep`, and the `sweepAt` family) do not exist there at
+all, so a consumer written against this table will revert rather than read
+false. Anyone wiring the integration
 in before the backfill lands is filtering out 100% of the registry while
 believing they applied a verified filter.
 
@@ -281,7 +284,8 @@ npm ci && npm test && npm run deploy
 ```
 
 That is the whole split: owner cold, attester hot, from the first block. The
-cold key needs roughly 0.05 CELO for the deployment and then never has to be
+cold key needs roughly 0.7 CELO for the deployment — v3 actually cost 0.361 and
+v4 is a larger contract, so budget with room — and then never has to be
 online again except to rotate a compromised attester.
 
 If you must deploy from the hot key, hand ownership over afterwards — the
