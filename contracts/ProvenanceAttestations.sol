@@ -282,7 +282,22 @@ contract ProvenanceAttestations {
 
         Attestation storage a = _attestations[key(c.agentId, c.clientAddress, c.feedbackIndex)];
         a.verdict = c.verdict;
-        a.evidence = c.evidence;
+        // Both dimensions are preserved by an `Unknown`, not just the payment.
+        // The asymmetry was a real hazard rather than a stylistic one: a sweep
+        // driven by the narrower payment-claims export carries no documentary
+        // columns at all, so every row arrived as `Evidence.Unknown` — which
+        // means "this pass did not look at the file", not "the file is no
+        // longer intact". Writing it flipped hasIntactEvidence to false for
+        // files that were still intact, and quietly withdrew every published
+        // accusation by returning it to "not evaluated".
+        if (c.evidence != Evidence.Unknown) {
+            a.evidence = c.evidence;
+            // The registry's own feedbackHash is the documentary dimension's
+            // cross-reference, so it travels with it. Zeroing it separately
+            // made a checked record indistinguishable from one whose registry
+            // entry attested no hash at all — the basis of EvidenceUnbound.
+            a.evidenceHash = c.evidenceHash;
+        }
         if (c.payment != Payment.Unknown) {
             a.payment = c.payment;
             a.amount = c.amount;
@@ -291,9 +306,11 @@ contract ProvenanceAttestations {
             a.paymentTx = c.paymentTx;
         }
         a.checkedAt = uint40(block.timestamp);
-        a.observedAt = c.observedAt;
+        // 0 means "not stated". Writing it over a known observation date
+        // replaces information with its absence, and re-dates facts this pass
+        // never re-checked.
+        if (c.observedAt != 0) a.observedAt = c.observedAt;
         unchecked { a.revision += 1; }
-        a.evidenceHash = c.evidenceHash;
 
         unchecked { totalAttestations += 1; }
 
@@ -302,14 +319,14 @@ contract ProvenanceAttestations {
             c.clientAddress,
             c.verdict,
             c.feedbackIndex,
-            c.evidence,
+            a.evidence,
             a.payment,
             a.paymentTx,
-            c.evidenceHash,
+            a.evidenceHash,
             a.amount,
             a.paymentToken,
             a.amountDecimals,
-            c.observedAt,
+            a.observedAt,
             a.revision
         );
     }

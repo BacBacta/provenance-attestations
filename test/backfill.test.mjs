@@ -324,6 +324,62 @@ check('the fingerprint counts rows, so a truncated input is visible in it', () =
   assert.ok(fingerprint([r, r]).startsWith('2-'))
 })
 
+check('the fingerprint covers every field that reaches the chain', () => {
+  // amountDecimals and observedAt were missing, so a run whose only change was
+  // one of those carried the previous run's fingerprint and resumed as if
+  // nothing had changed.
+  const base = { agentId: 1n, clientAddress: AAA, feedbackIndex: 0n, verdict: 2, evidence: 1, payment: 0, paymentTx: ZERO32, evidenceHash: ZERO32, amount: 0n, paymentToken: ZERO_ADDR, amountDecimals: 0, observedAt: 0 }
+  assert.notEqual(fingerprint([base]), fingerprint([{ ...base, amountDecimals: 6 }]))
+  assert.notEqual(fingerprint([base]), fingerprint([{ ...base, observedAt: 1_789_000_000 }]))
+})
+
+check('a rung named after an inherited property is not a rung', () => {
+  // `Verdict[row.rung]` reached the prototype chain, so 'constructor' resolved
+  // to a function — neither undefined nor a number — and passed every check.
+  for (const name of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+    const v = verdictOf({ rung: name, fetched: 'false', hasURI: 'true' })
+    assert.equal(typeof v, 'number', `${name} produced a non-number verdict`)
+    assert.equal(v, Verdict.EvidenceUnreachable, `${name} should fall through to the booleans`)
+    assert.equal(typeof evidenceOf({ evidenceRung: name, hasURI: 'true' }), 'number')
+  }
+})
+
+check('an index too wide for its on-chain type fails validation, not the run', () => {
+  // feedbackIndex is a uint64. A larger value used to survive every check and
+  // then make viem throw while a later batch was being assembled — after
+  // earlier batches had already been paid for.
+  const text = csv(HEADER, [row({ feedbackIndex: (2n ** 64n).toString() })])
+  const { rows, rejected } = buildAttestations(parseClaimsCsv(text), { map: new Map(), collisions: [] })
+  assert.equal(rows.length, 0)
+  assert.match(rejected[0].reason, /does not fit in uint64/)
+})
+
+check('an impossible observation date is unknown, not the moment of the run', () => {
+  // Clamping to now manufactured exactly the date this field exists to avoid:
+  // the write time wearing the observation's name.
+  assert.equal(observedAtOf({ observedAt: '2200-01-01T00:00:00Z' }), 0)
+  assert.equal(observedAtOf({ observedAt: '1600-01-01T00:00:00Z' }), 0)
+  const real = '2026-08-20T17:34:44Z'
+  assert.equal(observedAtOf({ observedAt: real }), Math.floor(Date.parse(real) / 1000))
+})
+
+check('a control character in a URI no longer collapses two records into one', () => {
+  /**
+   * escapeCell used to DELETE unprintable characters, which made the transform
+   * non-injective: two distinct feedbackURI values collapsed to one string, and
+   * that string is the legacy join key. The wrong feedbackIndex received the
+   * other record's verdict while every collision counter stayed at zero.
+   */
+  const CTRL = String.fromCharCode(1)
+  const a = 'ipfs://QmA' + CTRL
+  const b = 'ipfs://QmA'
+  assert.notEqual(escapeCell(a), escapeCell(b), 'distinct URIs must stay distinct')
+  const text = csv(HEADER, [row({ feedbackURI: a }), row({ feedbackIndex: '6', feedbackURI: b })])
+  const parsed = parseClaimsCsv(text)
+  assert.equal(parsed[0].feedbackURI, a, 'and round-trip exactly')
+  assert.equal(parsed[1].feedbackURI, b)
+})
+
 check('chunking splits without losing rows', () => {
   assert.deepEqual(chunk([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]])
 })

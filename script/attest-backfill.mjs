@@ -170,23 +170,76 @@ console.log(`attester      ${account.address}`)
  * the difference is either paid for twice or never written at all. Neither
  * failure raises anything, because both look like a clean run.
  */
+const TARGET = String(deployment.address).toLowerCase()
+
 let doneRows = 0
 if (existsSync(PROGRESS)) {
   try {
     const prior = JSON.parse(readFileSync(PROGRESS, 'utf8'))
-    if (prior.fingerprint && prior.fingerprint !== print) {
+
+    /**
+     * A missing fingerprint is a mismatch, not a dispensation.
+     *
+     * The previous guard only fired when a fingerprint was present, so a marker
+     * in the older format skipped it entirely and was then reinterpreted as
+     * `completedBatches * BATCH_SIZE` — a row count that changes with an
+     * environment variable. The v2 backfill left `{completedBatches: 201}`
+     * behind at the default batch of 100, so re-running this script against it
+     * computed 20,100 rows already written, found nothing pending, and reported
+     * success while writing nothing at all.
+     */
+    if (prior.fingerprint !== print) {
       console.error(
         `\nThe resume marker describes a different set of rows.\n` +
-        `  marker      ${prior.fingerprint}\n` +
+        `  marker      ${prior.fingerprint ?? 'none — pre-fingerprint format, a batch count that cannot be reinterpreted'}\n` +
         `  this run    ${print}\n` +
         `Resuming would re-attest some rows and skip others in silence.\n` +
         `Delete ${PROGRESS} to start over, or restore the original input.`,
       )
       process.exit(1)
     }
-    // A marker written before fingerprints existed only knows batches, and
-    // only means anything if the batch size has not changed since.
-    doneRows = prior.completedRows ?? (prior.completedBatches ?? 0) * (prior.batchSize ?? BATCH)
+
+    /**
+     * The marker must also name WHERE those rows went.
+     *
+     * `deployments/celo.json` is rewritten in place by every deployment, so
+     * after deploying a new contract the same file describes a different
+     * target. A marker that records only "20,097 rows done" then applies to a
+     * contract that has never been written to, and the script reports a
+     * complete backfill of an empty ledger — every record reading None, the one
+     * state this contract advertises as unforgeable.
+     */
+    if (String(prior.address ?? '').toLowerCase() !== TARGET || (prior.chainId ?? 0) !== celo.id) {
+      console.error(
+        `\nThe resume marker was written for a different target.\n` +
+        `  marker      ${prior.address ?? '(none recorded)'} on chain ${prior.chainId ?? '(none)'}\n` +
+        `  this run    ${deployment.address} on chain ${celo.id}\n` +
+        `Those rows are on that contract, not this one. Resuming would leave this\n` +
+        `contract reading None for every record.\n` +
+        `Delete ${PROGRESS} to backfill this contract from row 0.`,
+      )
+      process.exit(1)
+    }
+
+    doneRows = prior.completedRows ?? 0
+
+    /**
+     * A batch may have been broadcast and its receipt lost — a dropped
+     * connection, a killed process. The marker records that in flight, and the
+     * next run must not assume the transaction never landed.
+     */
+    if (prior.inFlight) {
+      console.error(
+        `\nThe previous run broadcast a batch and never recorded its outcome.\n` +
+        `  transaction ${prior.inFlight.hash}\n` +
+        `  rows        ${prior.inFlight.fromRow}–${prior.inFlight.toRow - 1}\n` +
+        `Check whether it landed before resuming: if it did and this run starts\n` +
+        `at row ${doneRows}, those rows are attested twice, each paying gas again and\n` +
+        `inflating a revision counter that is supposed to count real checks.\n` +
+        `Once you know, edit completedRows and remove inFlight from ${PROGRESS}.`,
+      )
+      process.exit(1)
+    }
   } catch (err) {
     console.error(`\n${PROGRESS} exists but could not be read: ${err.message}`)
     console.error('Refusing to guess how much was already written.')
@@ -204,25 +257,39 @@ if (!pending.length) {
 const allBatches = chunk(pending, BATCH)
 let written = doneRows
 
+const marker = (extra) => JSON.stringify({
+  fingerprint: print,
+  // The marker names its target, so it cannot be applied to a contract those
+  // rows were never written to.
+  address: TARGET,
+  chainId: celo.id,
+  completedRows: written,
+  totalRows: rows.length,
+  batchSize: BATCH,
+  updatedAt: new Date().toISOString(),
+  ...extra,
+}, null, 2)
+
 for (const [i, part] of allBatches.entries()) {
+  const fromRow = written
   const hash = await wallet.writeContract({
     address: deployment.address,
     abi,
     functionName: 'attestBatch',
     args: [part.map(toClaimStruct)],
   })
+  /**
+   * Recorded BEFORE waiting for the receipt. A batch that is broadcast and then
+   * loses its receipt — a dropped connection, a killed process — has landed or
+   * will land, and a marker written only on success cannot tell the next run
+   * that. It would resume at the same row and attest the whole batch again.
+   */
+  writeFileSync(PROGRESS, marker({ inFlight: { hash, fromRow, toRow: fromRow + part.length } }))
+
   const receipt = await pub.waitForTransactionReceipt({ hash })
   console.log(`batch ${i + 1}/${allBatches.length}: ${part.length} attestations — ${receipt.status} — ${hash}`)
   if (receipt.status !== 'success') process.exit(1)
   written += part.length
-  // Written only after the receipt confirms, so a crash resumes at the last
-  // batch that actually landed rather than the last one that was sent.
-  writeFileSync(PROGRESS, JSON.stringify({
-    fingerprint: print,
-    completedRows: written,
-    totalRows: rows.length,
-    batchSize: BATCH,
-    updatedAt: new Date().toISOString(),
-  }, null, 2))
+  writeFileSync(PROGRESS, marker({}))
 }
 console.log(`\nBackfill complete — ${written} of ${rows.length} rows attested.`)

@@ -232,6 +232,74 @@ await check('a pass that DOES re-evaluate the payment overwrites it', async () =
   assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributed', [1n, REVIEWER, 0n])).result, false)
 })
 
+await check('a pass that did not look at the file leaves the file alone', async () => {
+  /**
+   * The mirror of the sticky payment, and it was missing. A sweep driven by the
+   * narrower payment-claims export carries no documentary columns at all, so
+   * every row arrives as `Evidence.Unknown` — "this pass did not look at the
+   * file", not "the file is no longer intact". Writing it flipped
+   * hasIntactEvidence to false for files that were still intact, and returned
+   * every published accusation to "not evaluated".
+   */
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceIntact, evidence: E.Intact, evidenceHash: EH1, observedAt: 1_789_000_000,
+  })])
+  assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [1n, REVIEWER, 0n])).result, true)
+
+  // A later payment-only pass, exactly as the narrower export produces it.
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.PaymentAttributed, payment: P.Attributed, evidence: E.Unknown,
+    paymentTx: TX1, amount: 1_000_000n, paymentToken: TOKEN, amountDecimals: 6,
+    evidenceHash: ZERO32, observedAt: 0,
+  })])
+  const a = (await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result
+  assert.equal(a.evidence, E.Intact, 'the documentary state survived')
+  assert.equal(a.evidenceHash, EH1, 'and so did its cross-reference')
+  assert.equal(a.observedAt, 1_789_000_000, 'and the date of the observation it came from')
+  assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [1n, REVIEWER, 0n])).result, true)
+  assert.equal(a.payment, P.Attributed, 'while the payment pass still applied')
+})
+
+await check('an accusation is not withdrawn by a pass that did not re-check it', async () => {
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [claim({ verdict: V.EvidenceAbsent, evidence: E.Absent })])
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.PaymentTxNotFound, payment: P.NotFound, evidence: E.Unknown, evidenceHash: ZERO32,
+  })])
+  assert.equal((await chain.call(STRANGER, addr, 'evidenceOf', [1n, REVIEWER, 0n])).result, E.Absent)
+})
+
+await check('a pass that DOES re-read the file overwrites it', async () => {
+  // Preserved must not mean frozen.
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [claim({ verdict: V.EvidenceIntact, evidence: E.Intact })])
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceUnreachable, evidence: E.Unreachable, evidenceHash: ZERO32,
+  })])
+  const a = (await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result
+  assert.equal(a.evidence, E.Unreachable)
+  assert.equal(a.evidenceHash, ZERO32)
+})
+
+await check('the event reports the stored state on both dimensions', async () => {
+  // An indexer rebuilding from logs alone must not disagree with a reader.
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceIntact, evidence: E.Intact, evidenceHash: EH1, observedAt: 1_789_000_000,
+  })])
+  const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.PaymentAttributed, payment: P.Attributed, evidence: E.Unknown,
+    paymentTx: TX1, amount: 1_000_000n, paymentToken: TOKEN, amountDecimals: 6,
+    evidenceHash: ZERO32, observedAt: 0,
+  })])
+  const a = r.logs[0].args
+  assert.equal(a.evidence, E.Intact)
+  assert.equal(a.evidenceHash, EH1)
+  assert.equal(a.observedAt, 1_789_000_000)
+  assert.equal(a.payment, P.Attributed)
+})
+
 console.log('\nthe read surface')
 
 await check('hasIntactEvidence answers only about the file', async () => {

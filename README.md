@@ -51,10 +51,16 @@ keep their meanings exactly. 10–13 are new.
 A record's file and its payment are independent facts, and one verdict slot
 cannot carry both — the payment rungs outranked every documentary rung, so for
 every record declaring a payment the state of its file was measured and thrown
-away. They are stored side by side now, and the payment dimension is **sticky**:
-a pass with nothing to say about the payment leaves it alone, because a settled
-transfer does not stop having happened when its evidence file goes offline
-years later.
+away. They are stored side by side now.
+
+**Both are sticky.** `Payment.Unknown` and `Evidence.Unknown` mean *this pass
+had nothing to say*, and each leaves that dimension's stored state alone. A
+settled transfer does not stop having happened when its evidence file goes
+offline years later; and a sweep driven by the narrower payment-claims export —
+which carries no documentary columns at all — must not flip `hasIntactEvidence`
+to false for files that are still intact, nor quietly withdraw a published
+accusation by returning it to "not evaluated". `observedAt` follows the same
+rule: `0` means "not stated", so it never overwrites a date already recorded.
 
 ### Reading it
 
@@ -100,7 +106,7 @@ npm install
 npm test        # compiles, then runs the suite on a real in-process EVM
 ```
 
-No framework: `solc` compiles, `@ethereumjs/vm` executes. 68 tests across three
+No framework: `solc` compiles, `@ethereumjs/vm` executes. 82 tests across three
 suites:
 
 - **contract** — authorization, the two-step handover, overwrite semantics, the
@@ -158,10 +164,18 @@ more than one review are reported but not blocked: the reuse is a fact about the
 registry, and suppressing it would hide the finding rather than publish it. Set
 `FORCE=1` to proceed anyway, deliberately.
 
-Resume is by **rows written**, fingerprinted against the exact row set. A marker
-that describes a different input is refused rather than reinterpreted: it used
-to store a batch *count*, so resuming at a different `BATCH_SIZE` silently
-re-attested some rows and skipped others.
+Resume is by **rows written**, fingerprinted against the exact row set *and* the
+contract it was written to. A marker is refused, not reinterpreted, when it
+describes a different input, a different contract or chain, or predates the
+fingerprint entirely — it used to store a batch *count*, so resuming at a
+different `BATCH_SIZE` silently re-attested some rows and skipped others, and a
+marker left by an earlier deployment reported a complete backfill of a contract
+that had never been written to.
+
+A batch is recorded as **in flight before** its receipt is awaited. A
+transaction that is broadcast and then loses its receipt — a dropped connection,
+a killed process — has landed or will land, and the next run stops and says so
+rather than attesting the batch a second time.
 
 ## What this does not claim
 

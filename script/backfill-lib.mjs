@@ -104,8 +104,21 @@ const PAYMENT_OF_VERDICT = {
  * (`includes('zero')`, not `includes('transfer of zero')`): the two used to
  * differ by exactly that, which is the drift this comment is about.
  */
+/**
+ * A name is only a rung if this object actually declares it.
+ *
+ * `Verdict[row.rung]` reaches the prototype chain, so a CSV naming a rung of
+ * 'constructor' or 'toString' resolved to a function, which is neither
+ * undefined nor a number and passed straight through every later check.
+ */
+const own = (table, name) =>
+  typeof name === 'string' && Object.prototype.hasOwnProperty.call(table, name)
+    ? table[name]
+    : undefined
+
 export function verdictOf(row) {
-  if (row.rung && Verdict[row.rung] !== undefined) return Verdict[row.rung]
+  const named = own(Verdict, row.rung)
+  if (named !== undefined) return named
 
   if (row.paymentAttributed === 'true') return Verdict.PaymentAttributed
   if (row.paymentVerified === 'true') {
@@ -129,7 +142,8 @@ export function verdictOf(row) {
  * intact" instead of guessing which question the one verdict answered.
  */
 export function evidenceOf(row) {
-  if (row.evidenceRung && Evidence[row.evidenceRung] !== undefined) return Evidence[row.evidenceRung]
+  const named = own(Evidence, row.evidenceRung)
+  if (named !== undefined) return named
   if (row.fetched === 'true' && row.jsonValid !== 'false') {
     if (row.evidenceHash && /^0x0*$/.test(row.evidenceHash)) return Evidence.Unbound
     return row.hashMatched === 'true' ? Evidence.Intact : Evidence.Unhashed
@@ -171,10 +185,20 @@ export function amountOf(row) {
  * SyntaxError that stopped the whole backfill. Bad input must fail its own row,
  * loudly, not the run.
  */
-export function parseUint(value, label) {
+export function parseUint(value, label, bits = 256) {
   const raw = String(value ?? '').trim()
   if (!/^\d+$/.test(raw)) throw new Error(`${label} is not an unsigned integer: ${JSON.stringify(raw)}`)
-  return BigInt(raw)
+  const v = BigInt(raw)
+  /**
+   * Width matters, not just sign. `feedbackIndex` is a uint64 on chain, so a
+   * larger value encodes as something else entirely — viem throws while the
+   * batch is being assembled, which means the run dies partway through the
+   * spend rather than at validation, with earlier batches already paid for.
+   */
+  if (v >= (1n << BigInt(bits))) {
+    throw new Error(`${label} does not fit in uint${bits}: ${raw}`)
+  }
+  return v
 }
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/
@@ -283,7 +307,7 @@ export function buildAttestations(claims, cache) {
 
     if (c.feedbackIndex !== undefined && String(c.feedbackIndex).trim() !== '') {
       try {
-        feedbackIndex = parseUint(c.feedbackIndex, 'feedbackIndex')
+        feedbackIndex = parseUint(c.feedbackIndex, 'feedbackIndex', 64)
       } catch (err) {
         rejected.push({ row: i + 2, reason: err.message, claim: c })
         continue
@@ -404,9 +428,17 @@ export function observedAtOf(row) {
   const ms = Date.parse(raw)
   if (!Number.isFinite(ms)) return 0
   const secs = Math.floor(ms / 1000)
-  // The contract rejects an observation dated after the block recording it.
   const now = Math.floor(Date.now() / 1000)
-  return secs > now ? now : Math.max(0, secs)
+  /**
+   * An impossible date is unknown, not "now".
+   *
+   * Clamping a year-2200 timestamp to the moment of the run manufactured
+   * exactly the date this field exists to avoid — the write time wearing the
+   * observation's name. 0 already means "not stated", and the contract reads it
+   * that way. A date beyond uint40 is out of range for the same reason.
+   */
+  if (secs < 0 || secs > now || secs >= 2 ** 40) return 0
+  return secs
 }
 
 export function chunk(arr, size) {
@@ -437,7 +469,10 @@ export function fingerprint(rows) {
     }
   }
   for (const r of rows) {
-    feed(`${r.agentId}|${r.clientAddress}|${r.feedbackIndex}|${r.verdict}|${r.evidence}|${r.payment}|${r.paymentTx}|${r.evidenceHash}|${r.amount}|${r.paymentToken};`)
+    // Every field that reaches the chain. Two of them were missing, so a run
+    // whose only change was an amount's decimals or an observation date carried
+    // the previous run's fingerprint and resumed as if nothing had changed.
+    feed(`${r.agentId}|${r.clientAddress}|${r.feedbackIndex}|${r.verdict}|${r.evidence}|${r.payment}|${r.paymentTx}|${r.evidenceHash}|${r.amount}|${r.paymentToken}|${r.amountDecimals}|${r.observedAt};`)
   }
   return `${rows.length}-${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`
 }
