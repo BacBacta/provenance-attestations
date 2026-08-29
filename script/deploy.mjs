@@ -57,8 +57,23 @@ if (attester.toLowerCase() === account.address.toLowerCase()) {
   console.log('    Deploy from a cold key with ATTESTER=<hot key>, or hand ownership')
   console.log('    over afterwards with transferOwnership + acceptOwnership.')
 }
-if (balance === 0n) {
-  console.error('\nThe deployer holds no CELO. Fund it with ~2 CELO and re-run.')
+/**
+ * Price the deployment before attempting it.
+ *
+ * A balance too small to cover the gas fails inside viem's estimation with
+ * "Transaction creation failed" — a message that says nothing about funds, and
+ * that reads exactly like the transaction was rejected on its merits. Saying
+ * the actual number costs one RPC call.
+ */
+const gasPrice = await pub.getGasPrice()
+const needed = 2_000_000n * gasPrice
+if (balance < needed) {
+  console.error(
+    `\nThe deployer cannot cover this deployment.\n` +
+    `  balance  ${formatEther(balance)} CELO\n` +
+    `  needed   ~${formatEther(needed)} CELO at ${formatEther(gasPrice * 1_000_000_000n)} gwei\n` +
+    `Fund ${account.address} and re-run.`,
+  )
   process.exit(1)
 }
 
@@ -76,6 +91,38 @@ if (balance === 0n) {
  * already happened and this run must not repeat it. If the send throws, the
  * same address decides the outcome instead of the error.
  */
+/**
+ * Refuse to deploy a second contract while a first one is live.
+ *
+ * Checking only the CREATE address for the CURRENT nonce does not protect
+ * anything: a successful deployment increments the nonce, so the next address
+ * is fresh and empty and the check waves the second deployment straight
+ * through. The thing that must not be duplicated is the SERVICE, and what
+ * records it is deployments/celo.json — so that is what gets consulted.
+ *
+ * This matters more than a wasted fee. Two live contracts is a forked ledger:
+ * consumers read one, the attester writes the other, and both look correct.
+ */
+if (existsSync('deployments/celo.json')) {
+  const prior = JSON.parse(readFileSync('deployments/celo.json', 'utf8'))
+  if (prior.chainId === celo.id && prior.address) {
+    const priorCode = await pub.getBytecode({ address: prior.address }).catch(() => null)
+    if (priorCode) {
+      console.error(
+        `\nA contract is already deployed and recorded for this chain.\n` +
+        `  address  ${prior.address}${prior.version ? ` (v${prior.version})` : ''}\n` +
+        `  owner    ${prior.owner ?? prior.deployer}\n` +
+        `  attester ${prior.attester}\n` +
+        `Deploying again would leave two live contracts: consumers reading one\n` +
+        `while the attester writes the other, both looking correct.\n` +
+        `Set REDEPLOY=1 if a second deployment is genuinely what you want.`,
+      )
+      if (process.env.REDEPLOY !== '1') process.exit(1)
+      console.error('REDEPLOY=1 — proceeding anyway.\n')
+    }
+  }
+}
+
 const nonce = await pub.getTransactionCount({ address: account.address })
 const expected = getContractAddress({ from: account.address, nonce: BigInt(nonce) })
 console.log(`address   ${expected}  (deterministic: deployer + nonce ${nonce})`)

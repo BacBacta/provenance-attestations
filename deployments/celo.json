@@ -9,6 +9,6 @@
   "block": "76082999",
   "chainId": 42220,
   "deployedAt": "2026-08-29T06:09:17.000Z",
-  "note": "Owner and attester are separate keys. The owner is a cold key whose only power is rotating the attester; the attester signs verdicts and holds nothing else. Recorded from chain state after the deploy script mistook a lost RPC reply for a failed deployment.",
+  "note": "Owner and attester are separate keys. The owner is a cold key whose only power is rotating the attester; the attester signs verdicts and holds nothing else. Fields read back from chain state: the deploy script recorded version as null because its VERSION() read failed transiently just after deployment.",
   "supersedes": "0x3ed53c9bf7f7b5026eae83e4d62abdbd748a01ab"
 }
