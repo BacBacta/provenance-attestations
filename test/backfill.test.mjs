@@ -192,17 +192,38 @@ check('a rung asserting the transaction was found cannot carry a zero hash', () 
 check('the same record twice in one input is refused, not attested twice', () => {
   // Two writes in one backfill: double gas, and a revision counter that lies
   // about how many times the record was checked.
-  const text = csv(HEADER, [row({ feedbackIndex: '5' }), row({ feedbackIndex: '5', rung: 'EvidenceUnreachable' })])
+  const text = csv(HEADER, [
+    row({ feedbackIndex: '5' }),
+    row({ feedbackIndex: '5', rung: 'EvidenceUnreachable', evidenceRung: 'Unreachable', fetched: 'false', jsonValid: 'false', hashMatched: 'false' }),
+  ])
   const { rows, rejected } = buildAttestations(parseClaimsCsv(text), { map: new Map(), collisions: [] })
   assert.equal(rows.length, 1)
   assert.match(rejected[0].reason, /duplicate of row/)
 })
 
 check('the contract invariants are enforced here, before a batch is built', () => {
+  // A claim the contract would revert must fail at validation, not at the 74th
+  // batch with earlier batches already paid for.
   assert.match(incoherence({ verdict: Verdict.None, paymentTx: TX1, amount: 0n, paymentToken: ZERO_ADDR }), /None/)
   assert.match(incoherence({ verdict: Verdict.PaymentAttributed, paymentTx: TX1, amount: 0n, paymentToken: TOKEN }), /no amount/)
   assert.match(incoherence({ verdict: Verdict.EvidenceIntact, paymentTx: ZERO32, amount: 5n, paymentToken: ZERO_ADDR }), /no token/)
   assert.equal(incoherence({ verdict: Verdict.PaymentTxNotFound, paymentTx: ZERO32, amount: 0n, paymentToken: ZERO_ADDR }), null)
+})
+
+check('a headline that disagrees with either dimension is refused here too', () => {
+  assert.match(
+    incoherence({ verdict: Verdict.EvidenceAbsent, evidence: Evidence.Intact, paymentTx: ZERO32, amount: 0n, paymentToken: ZERO_ADDR }),
+    /implies evidence state/,
+  )
+  assert.match(
+    incoherence({ verdict: Verdict.PaymentAttributed, payment: Payment.Verified, paymentTx: TX1, amount: 5n, paymentToken: TOKEN }),
+    /implies payment state/,
+  )
+  // A payment rung may carry any documentary state — that is why there are two.
+  assert.equal(
+    incoherence({ verdict: Verdict.PaymentAttributed, evidence: Evidence.Unknown, payment: Payment.Attributed, paymentTx: TX1, amount: 5n, paymentToken: TOKEN }),
+    null,
+  )
 })
 
 console.log('\npayment reuse — reported, because hiding it would be the worse error')

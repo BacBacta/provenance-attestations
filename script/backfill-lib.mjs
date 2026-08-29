@@ -80,6 +80,22 @@ const ASSERTS_TX_EXISTS = new Set([
   Verdict.PaymentNoValue,
 ])
 
+/**
+ * Which documentary state each headline rung implies.
+ *
+ * The contract enforces this, so a claim that breaks it reverts the whole batch
+ * — mid-spend, after earlier batches have been paid for. Checking it here means
+ * the run stops at validation instead.
+ */
+const EVIDENCE_OF_VERDICT = {
+  [Verdict.EvidenceIntact]: Evidence.Intact,
+  [Verdict.EvidenceUnbound]: Evidence.Unbound,
+  [Verdict.EvidenceUnhashed]: Evidence.Unhashed,
+  [Verdict.EvidenceUnreachable]: Evidence.Unreachable,
+  [Verdict.EvidenceInconclusive]: Evidence.Inconclusive,
+  [Verdict.EvidenceAbsent]: Evidence.Absent,
+}
+
 /** Which payment state each headline rung implies. */
 const PAYMENT_OF_VERDICT = {
   [Verdict.PaymentAttributed]: Payment.Attributed,
@@ -338,7 +354,8 @@ export function buildAttestations(claims, cache) {
      * nothing used to reconcile them, so a rung asserting the transaction was
      * found could be paired with a zero hash.
      */
-    const problem = incoherence({ verdict, paymentTx, amount, paymentToken })
+    const evidence = evidenceOf(c)
+    const problem = incoherence({ verdict, evidence, payment, paymentTx, amount, paymentToken })
     if (problem) {
       rejected.push({ row: i + 2, reason: problem, claim: c })
       continue
@@ -349,7 +366,7 @@ export function buildAttestations(claims, cache) {
       clientAddress,
       feedbackIndex,
       verdict,
-      evidence: evidenceOf(c),
+      evidence,
       payment,
       paymentTx,
       evidenceHash: evidenceHash ?? ZERO32,
@@ -401,8 +418,17 @@ export function buildAttestations(claims, cache) {
 }
 
 /** The contract's own invariants, checked before a batch is ever assembled. */
-export function incoherence({ verdict, paymentTx, amount, paymentToken }) {
+export function incoherence({ verdict, evidence, payment, paymentTx, amount, paymentToken }) {
   if (verdict === Verdict.None) return 'verdict None can never be written'
+
+  const impliedPayment = PAYMENT_OF_VERDICT[verdict]
+  if (impliedPayment !== undefined && payment !== undefined && payment !== impliedPayment) {
+    return `${VERDICT_NAMES[verdict]} implies payment state ${impliedPayment}, not ${payment}`
+  }
+  const impliedEvidence = EVIDENCE_OF_VERDICT[verdict]
+  if (impliedEvidence !== undefined && evidence !== undefined && evidence !== impliedEvidence) {
+    return `${VERDICT_NAMES[verdict]} implies evidence state ${impliedEvidence}, not ${evidence}`
+  }
   if (ASSERTS_TX_EXISTS.has(verdict) && paymentTx === ZERO32) {
     return `${VERDICT_NAMES[verdict]} asserts the transaction was found but carries no hash`
   }

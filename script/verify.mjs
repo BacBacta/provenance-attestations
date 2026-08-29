@@ -23,6 +23,32 @@ if (!existsSync('deployments/celo.json')) {
 }
 const dep = JSON.parse(readFileSync('deployments/celo.json', 'utf8'))
 const standardInput = readFileSync('out/standard-input.json', 'utf8')
+
+/**
+ * Submitting a source that cannot produce the deployed bytecode wastes the
+ * explorer's time and, worse, leaves a contract looking unverifiable when it is
+ * simply being described by the wrong file. `out/` is whatever was compiled
+ * last, which after the source moved to v3 was no longer the contract recorded
+ * in deployments/celo.json.
+ */
+const deployedPath = 'out/ProvenanceAttestations.deployed.bin'
+if (existsSync(deployedPath)) {
+  const local = readFileSync(deployedPath, 'utf8').trim().toLowerCase()
+  const res = await fetch(process.env.CELO_RPC_URL ?? 'https://forno.celo.org', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getCode', params: [dep.address, 'latest'] }),
+  }).then((r) => r.json()).catch(() => null)
+  const onChain = String(res?.result ?? '').replace(/^0x/, '').toLowerCase()
+  // Metadata hashes differ per compilation, so compare the body, not the tail.
+  const body = (h) => h.slice(0, Math.max(0, h.length - 106))
+  if (onChain && body(onChain) !== body(local)) {
+    console.error(`The source in out/ does not match the bytecode at ${dep.address}.`)
+    console.error('Compile the source that was actually deployed before verifying:')
+    console.error('  CONTRACT_SOURCE=contracts/deployed/ProvenanceAttestationsV2.sol npm run compile')
+    process.exit(1)
+  }
+}
 const metadata = JSON.parse(readFileSync('out/metadata.json', 'utf8'))
 const compilerVersion = `v${metadata.compiler.version}`
 

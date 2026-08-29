@@ -123,8 +123,15 @@ if (missing.length) {
 }
 
 if (duplicateTxs.length) {
-  // Reported, not blocking: the reuse is a fact about the registry, and
-  // refusing to attest it would hide the finding rather than publish it.
+  /**
+   * Blocking, because a payment cited by several reviews backs at most one of
+   * them and the ledger has no way to say which. Publishing all of them as
+   * payment-backed would let one real transfer underwrite an entire fabricated
+   * history — the reuse is a finding about the registry, and it belongs in the
+   * audit's report rather than in an attestation that vouches for each of them.
+   * FORCE=1 attests them anyway, deliberately and on the record.
+   */
+  blocking++
   const affected = duplicateTxs.reduce((s, d) => s + d.users.length, 0)
   console.log(`\nREUSED PAYMENTS (${duplicateTxs.length} transactions across ${affected} reviews):`)
   for (const d of duplicateTxs.slice(0, 10)) {
@@ -132,7 +139,8 @@ if (duplicateTxs.length) {
       `(${new Set(d.users.map((u) => u.reviewer)).size} reviewer(s), ${new Set(d.users.map((u) => u.agentId)).size} agent(s))`)
   }
   if (duplicateTxs.length > 10) console.log(`  … and ${duplicateTxs.length - 10} more`)
-  console.log('  A payment cited by several reviews backs at most one of them.')
+  console.log('  A payment cited by several reviews backs at most one of them,')
+  console.log('  and nothing here can say which. Resolve upstream, or FORCE=1.')
 }
 
 if (blocking && !FORCE) {
@@ -161,6 +169,47 @@ const wallet = createWalletClient({ account, chain: celo, transport: http(RPC) }
 
 console.log(`\ncontract      ${deployment.address}`)
 console.log(`attester      ${account.address}`)
+
+/**
+ * Confirm the contract at that address speaks this ABI before spending a cent.
+ *
+ * `deployments/celo.json` is written by the deploy script and `out/` by the
+ * compiler, and nothing tied the two together: after the contract source moved
+ * to v3 while the recorded address still pointed at the live v2, this script
+ * would encode the v3 `attestBatch((...)[])` and send it to a contract whose
+ * `attestBatch` takes six parallel arrays. The selector does not exist there,
+ * so every batch reverts — gas burnt, nothing written, and the failure only
+ * visible after the first transaction.
+ */
+const abiVersion = abi.some((e) => e.type === 'function' && e.name === 'VERSION')
+let onChainVersion = null
+try {
+  onChainVersion = await pub.readContract({ address: deployment.address, abi, functionName: 'VERSION' })
+} catch {
+  onChainVersion = null
+}
+if (abiVersion && onChainVersion === null) {
+  console.error(
+    `\nThe contract at ${deployment.address} does not answer VERSION().\n` +
+    `The compiled ABI in out/ is not the ABI of the contract recorded in\n` +
+    `deployments/celo.json — sending this batch would revert on an unknown\n` +
+    `selector and burn the gas. Deploy the current contract, or point\n` +
+    `deployments/celo.json back at the one this ABI belongs to.`,
+  )
+  process.exit(1)
+}
+if (onChainVersion) console.log(`version       ${onChainVersion}`)
+
+const onChainAttester = await pub.readContract({ address: deployment.address, abi, functionName: 'attester' })
+if (String(onChainAttester).toLowerCase() !== account.address.toLowerCase()) {
+  console.error(
+    `\nThis key is not the attester for ${deployment.address}.\n` +
+    `  contract expects ${onChainAttester}\n` +
+    `  this key is      ${account.address}\n` +
+    `Every batch would revert with NotAttester.`,
+  )
+  process.exit(1)
+}
 
 /**
  * Resume by ROWS COMPLETED against a fingerprint of the row set.

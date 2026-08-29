@@ -430,6 +430,33 @@ await check('the headline and the payment dimension cannot name different outcom
   assert.equal((await chain.call(ATTESTER, addr, 'attest', [attributed()])).reverted, false)
 })
 
+await check('the headline and the documentary dimension cannot disagree either', async () => {
+  // The payment side got this rule first; the file side was left open, so a
+  // headline of EvidenceAbsent could carry evidence: Intact and hasIntactEvidence
+  // then contradicted the verdict printed beside it.
+  const { chain, addr } = await fresh()
+  const bad = await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceAbsent, evidence: E.Intact,
+  })])
+  assert.equal(bad.selector, ERRORS.DimensionMismatch)
+  assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [1n, REVIEWER, 0n])).result, false)
+
+  const alsoBad = await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceIntact, evidence: E.Unreachable,
+  })])
+  assert.equal(alsoBad.selector, ERRORS.DimensionMismatch)
+})
+
+await check('a payment headline still says nothing about the file, either way', async () => {
+  // Which is the whole reason the second dimension exists: a payment rung may
+  // carry any documentary state, including Unknown.
+  const { chain, addr } = await fresh()
+  for (const e of [E.Unknown, E.Intact, E.Unreachable, E.Absent]) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [attributed({ evidence: e })])
+    assert.equal(r.reverted, false, `payment rung refused evidence ${e}`)
+  }
+})
+
 await check('a token with no amount is refused, like an amount with no token', async () => {
   const { chain, addr } = await fresh()
   const r = await chain.call(ATTESTER, addr, 'attest', [claim({ amount: 0n, paymentToken: TOKEN })])

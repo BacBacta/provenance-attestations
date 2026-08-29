@@ -365,6 +365,12 @@ contract ProvenanceAttestations {
         Payment implied = _impliedPayment(c.verdict);
         if (implied != Payment.Unknown && c.payment != implied) revert DimensionMismatch();
 
+        // The same rule on the documentary side. Without it a headline of
+        // `EvidenceAbsent` could carry `evidence: Intact`, and hasIntactEvidence
+        // then contradicted the verdict printed beside it.
+        Evidence impliedEvidence = _impliedEvidence(c.verdict);
+        if (impliedEvidence != Evidence.Unknown && c.evidence != impliedEvidence) revert DimensionMismatch();
+
         // States that assert the transaction was found must name it. `NotFound`
         // and `ForeignChain` are exempt: a malformed or unqueryable claim is
         // exactly the case where there is no well-formed hash to carry.
@@ -396,6 +402,19 @@ contract ProvenanceAttestations {
         if (v == Verdict.PaymentTxNotFound) return Payment.NotFound;
         if (v == Verdict.PaymentForeignChain) return Payment.ForeignChain;
         return Payment.Unknown;
+    }
+
+    /// @dev The documentary state a headline rung implies, or `Unknown` for the
+    ///      payment rungs, which say nothing about the file either way — that is
+    ///      exactly why the second dimension exists.
+    function _impliedEvidence(Verdict v) private pure returns (Evidence) {
+        if (v == Verdict.EvidenceIntact) return Evidence.Intact;
+        if (v == Verdict.EvidenceUnbound) return Evidence.Unbound;
+        if (v == Verdict.EvidenceUnhashed) return Evidence.Unhashed;
+        if (v == Verdict.EvidenceUnreachable) return Evidence.Unreachable;
+        if (v == Verdict.EvidenceInconclusive) return Evidence.Inconclusive;
+        if (v == Verdict.EvidenceAbsent) return Evidence.Absent;
+        return Evidence.Unknown;
     }
 
     function _assertsTxExists(Verdict v) private pure returns (bool) {

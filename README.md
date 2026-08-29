@@ -19,8 +19,9 @@ verifier's ledger: for a given feedback record, it stores the outcome of
 actually verifying the claim against the chain.
 
 It scores nothing and ranks nothing. Scorers, marketplaces and routers read it
-(`isPaymentBacked(...)`, one call) to weight feedback by something harder than
-assertion.
+(`isPaymentAttributed(...)`, one call) to weight feedback by something harder
+than assertion — and `isPaymentAttributedAtLeast(..., min, token)` when a
+payment is meant to be a barrier to entry rather than a signal.
 
 ## The contract
 
@@ -106,7 +107,7 @@ npm install
 npm test        # compiles, then runs the suite on a real in-process EVM
 ```
 
-No framework: `solc` compiles, `@ethereumjs/vm` executes. 82 tests across three
+No framework: `solc` compiles, `@ethereumjs/vm` executes. 85 tests across three
 suites:
 
 - **contract** — authorization, the two-step handover, overwrite semantics, the
@@ -158,11 +159,19 @@ that join is reported, because a collision is a join that *succeeds onto the
 wrong index* and is therefore invisible to a missing-row check.
 
 Nothing is written until every row is accounted for. Malformed rows, rows that
-fail to join, rows the contract would refuse, and duplicate records each block
-the run — in a real run, not only in the dry run. Payment transactions cited by
-more than one review are reported but not blocked: the reuse is a fact about the
-registry, and suppressing it would hide the finding rather than publish it. Set
-`FORCE=1` to proceed anyway, deliberately.
+fail to join, rows the contract would refuse, duplicate records, and payment
+transactions cited by more than one review each block the run — in a real run,
+not only in the dry run. A payment cited by several reviews backs at most one of
+them and the ledger cannot say which, so attesting all of them would let one
+real transfer underwrite a fabricated history; the reuse belongs in the audit's
+report, not in an attestation vouching for each. Set `FORCE=1` to proceed
+anyway, deliberately and on the record.
+
+Before the first batch, the script reads `VERSION()` and `attester()` from the
+contract named in `deployments/celo.json` and stops if the compiled ABI does not
+match it or the key is not the attester. That file and `out/` are written by
+different commands, and sending a batch encoded for one contract to another
+burns the gas and writes nothing.
 
 Resume is by **rows written**, fingerprinted against the exact row set *and* the
 contract it was written to. A marker is refused, not reinterpreted, when it
