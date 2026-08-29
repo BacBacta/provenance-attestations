@@ -158,11 +158,11 @@ Reading `getAttestation(...).verdict == None` separates them, and `isWithinSweep
 answers the harder question — whether the attester ever *claimed* to have looked
 at the block that record was written in. A `false` inside a swept range is a
 finding; outside one it is only silence. **This matters right now:** the canonical
-deployment (v3, below) is live and empty, so today the six calls it has all
-return `false` or zero for every address on Celo — and the three added in v4
-(`coverage`, `isWithinSweep`, and the `sweepAt` family) do not exist there at
-all, so a consumer written against this table will revert rather than read
-false. Anyone wiring the integration
+deployment (v4, below) is live and **empty** — no backfill has been written to
+it — so today every call in this table returns `false` or zero for every
+address on Celo. Anyone wiring the integration in before the backfill lands is
+filtering out 100% of the registry while believing they applied a verified
+filter. The v3 address is still live and was never written to either. Anyone wiring the integration
 in before the backfill lands is filtering out 100% of the registry while
 believing they applied a verified filter.
 
@@ -266,9 +266,14 @@ The sources of **every deployment that is still on chain** are frozen under
 verifiable from this repository even though the working contract has moved on:
 
 ```bash
+CONTRACT_SOURCE=contracts/deployed/ProvenanceAttestationsV4.sol npm run compile
 CONTRACT_SOURCE=contracts/deployed/ProvenanceAttestationsV3.sol npm run compile
 CONTRACT_SOURCE=contracts/deployed/ProvenanceAttestationsV2.sol npm run compile
 ```
+
+The v4 build is reproducible to the byte: the code at
+`0x050394eF…8e17` matches `out/ProvenanceAttestations.deployed.bin` exactly,
+metadata tail included.
 
 ## Deploy (Celo mainnet)
 
@@ -284,8 +289,8 @@ npm ci && npm test && npm run deploy
 ```
 
 That is the whole split: owner cold, attester hot, from the first block. The
-cold key needs roughly 0.7 CELO for the deployment — v3 actually cost 0.361 and
-v4 is a larger contract, so budget with room — and then never has to be
+cold key needs roughly 0.7 CELO for the deployment — v3 cost 0.361 and v4 cost
+0.576 at 202 gwei, so budget with room — and then never has to be
 online again except to rotate a compromised attester.
 
 If you must deploy from the hot key, hand ownership over afterwards — the
@@ -317,10 +322,10 @@ it runs identically on any EVM chain.
 
 | | |
 |---|---|
-| **v4** | `contracts/ProvenanceAttestations.sol` — **not deployed.** Adds the coverage commitments above and a separate observation date per dimension. |
-| **v3** | [`0xAD6202F6…6807`](https://celo.blockscout.com/address/0xAD6202F635e97f17f193524CCa66B5D288ab6807) — block 76,082,999, live, **still empty**: no backfill has been written to it |
+| **v4** | [`0x050394eF…8e17`](https://celo.blockscout.com/address/0x050394eF9941D30f4a2D5989Ddc158e717798e17) — block 76,143,874, **the current deployment**, empty until backfilled |
 | owner | `0x6141C737…C4ef` — cold, its only power is rotating the attester |
 | attester | `0xC2Dc6B28…972A` — signs verdicts, and nothing else |
+| **v3** | [`0xAD6202F6…6807`](https://celo.blockscout.com/address/0xAD6202F635e97f17f193524CCa66B5D288ab6807) — block 76,082,999, still live, never written to |
 | **v2** | [`0x3ed53c9b…01ab`](https://celo.blockscout.com/address/0x3ed53c9bf7f7b5026eae83e4d62abdbd748a01ab) — still live, holds the 20,097 verdicts, one key for both roles |
 
 The key split the counter-analysis asked for is in v3's creation transaction

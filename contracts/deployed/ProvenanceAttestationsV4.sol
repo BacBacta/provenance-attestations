@@ -1,0 +1,938 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.28;
+
+/// @title  ProvenanceAttestations
+/// @notice On-chain evidence-integrity verdicts for ERC-8004 reputation
+///         feedback on Celo.
+///
+/// @dev    WHY THIS EXISTS
+///         The ERC-8004 Reputation Registry lets anyone score any agent. The
+///         standard leaves room for evidence — an off-chain file, its attested
+///         hash, and an optional `proofOfPayment` naming the transaction the
+///         review is about — but nothing requires any of it and nothing checks
+///         it. A full-history census of the Celo registry (27,520 records,
+///         Feb–Aug 2026) found that 38% declare an evidence file, three
+///         quarters of those files are dead links, 35% attest a hash while
+///         publishing no file at all, 93 records name a payment, and 17 of
+///         those payments exist.
+///
+///         This contract is the verifier's ledger: for a given feedback record
+///         it stores how far its evidence actually holds up. It scores nothing
+///         and ranks nothing — scorers, marketplaces and routers read it to
+///         weight feedback by something harder than assertion.
+///
+/// @dev    WHAT CHANGED FROM v2
+///         v2's own counter-analysis found the top of its ladder usurpable and
+///         its read surface misleading. Four repairs follow from that, and none
+///         of them renumbers an existing value: 20,097 verdicts are already
+///         published under values 0–9 and indexers depend on them, so the new
+///         rungs are appended at 10–13 and the old ones keep their meanings.
+///
+///         1. `PaymentVerified` says a cited transaction settled. It never said
+///            the payer was the reviewer or the payee the agent, so anyone could
+///            cite any real transfer on the chain and collect the strongest
+///            verdict in the system. `PaymentAttributed` (10) is that stronger
+///            claim, with both ends confirmed; `PaymentPartyMismatch` (11) is
+///            the accusation when they provably belong to somebody else.
+///         2. A record has two independent dimensions — what its file does and
+///            what its payment does — and v2 had one slot for both. The payment
+///            rungs outranked every documentary rung, so for every record that
+///            declared a payment the state of its file was measured and then
+///            discarded. They are now stored side by side.
+///         3. `hasIntactEvidence` returned true for `PaymentVerified`, which
+///            asserts nothing whatsoever about a file. It now answers only the
+///            question it names.
+///         4. A settled payment is immutable, but v2's single slot let a later
+///            re-attestation overwrite it — a file dying years afterwards would
+///            flip `isPaymentBacked` from true to false about a transaction
+///            that had not changed. The payment dimension is now sticky: a pass
+///            with nothing to say about the payment leaves it alone.
+///
+///         Also new: the settled amount and its token, so "payment-backed" can
+///         be told apart from a dust transfer without an off-chain lookup; and
+///         `observedAt`, because `checkedAt` is the block that recorded the
+///         verdict, which for a backfill is days after the observation.
+///
+/// @dev    WHAT CHANGED FROM v3
+///         v3 could prove what it had written and nothing about what it had
+///         not. Events prove attestations; they cannot prove that everything
+///         which should have been attested was — so an attester with something
+///         to hide never had to lie, it only had to stay quiet, and silence
+///         left no trace anywhere.
+///
+///         {commitSweep} closes that by making coverage a published claim
+///         rather than an assumption. The scope of a sweep is deterministic —
+///         every NewFeedback event the registry emitted in a block range — so
+///         anyone can re-index the same range, count, and rebuild the same
+///         Merkle root over the record keys. A count that does not match is
+///         proof of omission; the root proves *which* records, via an ordinary
+///         inclusion proof, without this contract having to store them.
+///
+///         This does not prevent censorship. It converts it from invisible into
+///         falsifiable, which is the same standard this service applies to
+///         every verdict it publishes about somebody else.
+///
+/// @dev    TRUST MODEL, STATED PLAINLY
+///         Verdicts are written by a single accountable attester, rotatable by
+///         the owner. This is honest centralization: the attestation process is
+///         open source and reproducible, so any party can re-run it and dispute
+///         a verdict publicly. Decentralizing the attester (staked re-execution,
+///         multi-attester quorum) is roadmap, not premise. The contract
+///         custodies no funds, has no payable path, and makes no external calls.
+///
+///         Ownership transfer is two-step on purpose. The owner's only power is
+///         rotating the attester, which is the sole defence if the attesting key
+///         is compromised — and a one-step transfer to a mistyped address
+///         destroys that defence permanently and silently. Two steps also make
+///         it safe to move ownership to a cold key held apart from the hot
+///         attesting key, which is the configuration this service should run in
+///         and the one a single-key deployment cannot express.
+contract ProvenanceAttestations {
+    // ---------------------------------------------------------------- types
+
+    /// @notice How far a feedback record's evidence survives verification.
+    /// @dev    `None` is the mapping default and can never be written, so
+    ///         "never attested" stays unforgeable. Values are append-only:
+    ///         0–9 are published on chain under v2 and must never be renumbered
+    ///         or redefined.
+    enum Verdict {
+        None,                 // 0 — never attested
+        PaymentVerified,      // 1 — declared payment exists, succeeded, moved value. NOT attributed.
+        EvidenceIntact,       // 2 — file resolves as valid JSON and matches its attested hash
+        EvidenceUnbound,      // 3 — file resolves as valid JSON but no hash was attested: nothing binds it
+        EvidenceUnhashed,     // 4 — file resolves as valid JSON and contradicts its attested hash
+        PaymentTxNotFound,    // 5 — a payment was declared; it is not on this chain
+        PaymentTxFailed,      // 6 — declared payment exists but reverted
+        PaymentNoValue,       // 7 — declared payment succeeded but moved nothing relevant
+        EvidenceUnreachable,  // 8 — a host answered that the declared file is gone
+        EvidenceAbsent,       // 9 — a hash was attested with no file published at all
+        PaymentAttributed,    // 10 — …and this reviewer paid this agent. The strong rung.
+        PaymentPartyMismatch, // 11 — settled, but its parties contradict the claim
+        PaymentForeignChain,  // 12 — declared on a chain the attester does not query
+        EvidenceInconclusive  // 13 — retrieval failed in a way that proves nothing
+    }
+
+    /// @notice The documentary dimension, recorded whatever the payment says.
+    /// @dev    `Unknown` means this pass did not evaluate the file.
+    enum Evidence {
+        Unknown,      // 0
+        Intact,       // 1
+        Unbound,      // 2
+        Unhashed,     // 3
+        Unreachable,  // 4
+        Inconclusive, // 5
+        Absent        // 6
+    }
+
+    /// @notice The payment dimension, recorded whatever the file says.
+    /// @dev    `Unknown` is not "no payment": it is "this pass had nothing to
+    ///         say", and writing it PRESERVES whatever was known before. A
+    ///         settled transfer is a permanent fact about the chain, and must
+    ///         not be erased by a later pass that could no longer read the file
+    ///         naming it.
+    enum Payment {
+        Unknown,       // 0 — nothing evaluated this pass; prior state is kept
+        Attributed,    // 1
+        Verified,      // 2
+        PartyMismatch, // 3
+        NoValue,       // 4
+        Failed,        // 5
+        NotFound,      // 6
+        ForeignChain,  // 7
+        /**
+         * 8 — the file was read, and it declares no payment at all.
+         *
+         * Appended, not inserted: 0–7 are published under v3 and keep their
+         * meanings. Without this value "we did not look" and "we looked and
+         * there was nothing to look at" were the same stored zero, and a
+         * consumer separating reviews that claim a payment from reviews that
+         * do not put both in the same bucket — including the 76 declared
+         * payments that do not exist on this chain, which is the exact
+         * population this ledger was built to name.
+         *
+         * It is a finding, not an absence, so it is NOT sticky: it overwrites.
+         *
+         * That it is written only by a pass that actually read the document is
+         * a rule of the PIPELINE, not of this contract, and saying otherwise
+         * here would be claiming a guarantee nothing enforces. What the
+         * contract can check, it does: the value may not arrive carrying the
+         * payment it denies, and it may not sit under a headline that names a
+         * payment outcome.
+         */
+        NotDeclared
+    }
+
+    struct Attestation {
+        Verdict verdict;       // headline rung of the latest check
+        Evidence evidence;     // documentary dimension
+        Payment payment;       // payment dimension (sticky — see {Payment})
+        uint32 revision;       // number of WRITES to this record — see below
+        uint8 amountDecimals;  // decimals of `amount`, from the token
+        uint40 checkedAt;      // block.timestamp of the latest write, any dimension
+        /**
+         * When each dimension was last ACTUALLY looked at; 0 when never stated.
+         *
+         * One shared date could not tell the truth about two dimensions updated
+         * independently. A payment-only sweep refreshed it, so a documentary
+         * verdict nobody had re-examined for months carried today's date — the
+         * reader had no way to tell a fresh answer from a stale one, which is
+         * the whole reason a verdict carries a date at all.
+         */
+        uint40 evidenceObservedAt;
+        uint40 paymentObservedAt;
+        /**
+         * The transaction this payment verdict is ABOUT — not a transcript of
+         * what the file declared.
+         *
+         * It is written only by a pass that states the payment dimension, so
+         * the hash and the verdict about it can never drift apart. The cost of
+         * that pairing is that `paymentTx == 0` carries three distinct
+         * meanings: no pass has evaluated the payment yet, or the claim was
+         * malformed or on a chain this attester does not query (`NotFound`,
+         * `ForeignChain`, which are exempt from carrying a hash), or the file
+         * declares no payment at all. Read `payment` to tell them apart —
+         * `Unknown`, one of those two rungs, and `NotDeclared` respectively.
+         * Sorting on `paymentTx == 0` alone puts a fraudulent claim in the same
+         * bucket as an honest review that never made one.
+         */
+        bytes32 paymentTx;
+        bytes32 evidenceHash;  // the registry's own feedbackHash, for cross-reference
+        uint96 amount;         // settled amount in token base units; 0 when unknown
+        address paymentToken;  // token the amount is denominated in
+    }
+
+    /// @notice One record's verification outcome, as submitted by the attester.
+    /// @dev    A struct rather than six parallel arrays. The arrays had to be
+    ///         length-checked at runtime because nothing else stopped them from
+    ///         drifting out of step, and a mis-zipped batch writes correct-looking
+    ///         verdicts onto the wrong records.
+    struct Claim {
+        uint256 agentId;
+        address clientAddress;
+        uint64 feedbackIndex;
+        Verdict verdict;
+        Evidence evidence;
+        Payment payment;
+        bytes32 paymentTx;
+        bytes32 evidenceHash;
+        uint96 amount;
+        address paymentToken;
+        uint8 amountDecimals;
+        uint40 observedAt;
+    }
+
+    /// @notice One attester's published claim about what it covered.
+    /// @dev    `observed` is what the attester says the registry emitted in the
+    ///         range; `attested` is how many of those it wrote verdicts for. The
+    ///         gap is not necessarily wrong — a record may legitimately be out
+    ///         of scope — but it is now a number somebody can argue with.
+    struct Sweep {
+        uint64 fromBlock;
+        uint64 toBlock;
+        uint32 observed;
+        uint32 attested;
+        uint40 committedAt;
+        /**
+         * Withdrawn by the attester.
+         *
+         * Ranges are strictly ordered so the membership question stays cheap,
+         * which means a sweep committed with wrong numbers can never be
+         * re-committed. Retraction is the only correction available, and it is
+         * deliberately not an erasure: the entry stays, dated and attributable,
+         * with its withdrawal beside it. A claim withdrawn is not a claim
+         * unmade, and the record of having made it is the point.
+         */
+        bool retracted;
+        /// @dev Merkle root over the sorted {key} of every record OBSERVED in
+        ///      the range — never of the subset that was attested. That is the
+        ///      whole point: a root over what was written proves only what the
+        ///      events already prove, while a root over what was seen is what
+        ///      an omission is measured against.
+        ///      bytes32(0) means the attester published counts without a root,
+        ///      which is a weaker claim and readable as such.
+        bytes32 recordsRoot;
+    }
+
+    // ---------------------------------------------------------------- state
+
+    address public owner;
+    /// @notice Owner-elect under the two-step handover. Zero when none pending.
+    address public pendingOwner;
+    address public attester;
+
+    /// @dev key(agentId, clientAddress, feedbackIndex) => latest attestation.
+    ///      Prior revisions stay fully reconstructable from event history.
+    mapping(bytes32 => Attestation) private _attestations;
+
+    /// @notice Total attestation WRITES, including re-attestations and writes
+    ///         that changed nothing.
+    /// @dev    Not a count of verifications, and deliberately not presented as
+    ///         one. Either dimension may arrive as `Unknown`, so a record can
+    ///         be written ten times with its payment examined once; a rewrite
+    ///         identical to the stored state is accepted and counted too.
+    ///         Treat it as "the service is still writing", never as "this much
+    ///         work was done". The honest per-record answer to "when was this
+    ///         last actually checked" is `evidenceObservedAt` /
+    ///         `paymentObservedAt`, which only a pass that looked can move.
+    uint256 public totalAttestations;
+
+    /// @notice Every coverage claim ever published, oldest first. The array is
+    ///         the audit trail — each claim's own numbers, root and date, kept
+    ///         even after withdrawal.
+    Sweep[] private _sweeps;
+
+    /**
+     * What is covered, as one contiguous frontier.
+     *
+     * The array answers "what did the attester claim, and when". These three
+     * answer "is this block covered", which is the question that incriminates
+     * the attester, and they answer it in two SLOADs no matter how long the
+     * history gets. A linear scan over the array was brickable for about five
+     * dollars; a binary search fixed the cost but needed strictly advancing,
+     * disjoint ranges — and the census sweeps from the registry's deployment
+     * block EVERY time, so the second run could never commit at all.
+     *
+     * Coverage is therefore a single interval that only grows. A new sweep
+     * must advance `_coveredTo` and must not open a gap behind it, which also
+     * makes "inside a swept range" mean what it says: there are no holes for a
+     * record to fall into unnoticed. `_liveSweeps` is zero when every claim
+     * has been withdrawn, which reads as never having stated coverage rather
+     * than as having covered nothing.
+     */
+    uint64 private _coveredFrom;
+    uint64 private _coveredTo;
+    uint256 private _liveSweeps;
+
+    /// @notice Contract revision, for consumers that read across deployments.
+    string public constant VERSION = "4.0.0";
+
+    // ---------------------------------------------------------------- events
+
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event AttesterChanged(address indexed previousAttester, address indexed newAttester);
+
+    /// @notice Emitted on every attestation, including re-attestations.
+    /// @dev    Mirrors the registry's own (agentId, clientAddress, feedbackIndex)
+    ///         keying so indexers can join without holding state.
+    ///
+    ///         `evidence` and `payment` are the STORED state after the sticky
+    ///         merge, so an indexer replaying the log arrives at what a reader
+    ///         of the mapping sees. `statedEvidence` and `statedPayment` are
+    ///         what this pass actually claimed, `Unknown` meaning it did not
+    ///         look. Both are needed and neither can be derived from the other:
+    ///         with only the merged values, a re-verification and a value
+    ///         carried forward from months ago are the same log line, and the
+    ///         history the stickiness rule leans on ("history lives in events")
+    ///         cannot be reconstructed per dimension.
+    ///
+    ///         `verdict` is indexed because it is the headline of the pass. It
+    ///         is NOT the answer to "is this payment attributed" — that lives
+    ///         in `payment`, which is sticky while `verdict` is overwritten
+    ///         every pass, so the honest pipeline routinely emits an attributed
+    ///         payment under a documentary verdict. Subscribe to
+    ///         {PaymentAttested} for that question; filtering `verdict` topics
+    ///         for it returns a different set than {isPaymentAttributed}.
+    ///
+    ///         `amountDecimals` and `paymentObservedAt` are deliberately not
+    ///         here. Both belong to the payment dimension, both can only change
+    ///         in a pass that states it, and {PaymentAttested} carries them in
+    ///         full on exactly those passes — so an indexer consuming both
+    ///         events reconstructs everything, and this one stays inside the
+    ///         stack the compiler will give a single emit.
+    event FeedbackAttested(
+        uint256 indexed agentId,
+        address indexed clientAddress,
+        Verdict indexed verdict,
+        uint64 feedbackIndex,
+        Evidence evidence,
+        Payment payment,
+        Evidence statedEvidence,
+        Payment statedPayment,
+        bytes32 paymentTx,
+        bytes32 evidenceHash,
+        uint96 amount,
+        address paymentToken,
+        uint40 evidenceObservedAt,
+        uint32 revision
+    );
+
+    /// @notice Emitted only by a pass that actually evaluated the payment
+    ///         dimension, with the resulting rung as a topic.
+    /// @dev    The subscribable form of the strongest claim this contract
+    ///         makes. {FeedbackAttested} indexes `verdict`, which is a merged
+    ///         headline: a consumer filtering it for attributed payments
+    ///         silently misses every record whose payment was attributed under
+    ///         a documentary verdict, and that is the common case in the
+    ///         pipeline that writes here. Its absence is also information —
+    ///         a record written without it had its payment carried forward,
+    ///         not re-checked.
+    event PaymentAttested(
+        uint256 indexed agentId,
+        address indexed clientAddress,
+        Payment indexed payment,
+        uint64 feedbackIndex,
+        bytes32 paymentTx,
+        uint96 amount,
+        address paymentToken,
+        uint8 amountDecimals,
+        uint40 observedAt
+    );
+
+    /// @notice Emitted when the attester publishes what a sweep covered.
+    event SweepCommitted(
+        uint256 indexed index,
+        uint64 fromBlock,
+        uint64 toBlock,
+        uint32 observed,
+        uint32 attested,
+        bytes32 recordsRoot
+    );
+
+    /// @notice Emitted when the attester withdraws a coverage claim.
+    event SweepRetracted(uint256 indexed index, uint64 fromBlock, uint64 toBlock);
+
+    // ---------------------------------------------------------------- errors
+
+    error NotOwner();
+    error NotPendingOwner();
+    error NotAttester();
+    error ZeroAddress();
+    error InvalidVerdict();
+    error EmptyBatch();
+    /// @dev A rung asserting the transaction was found, carrying no transaction.
+    error MissingPaymentTx();
+    /// @dev An attributed payment that moved nothing, or an amount with no token.
+    error IncoherentAmount();
+    /// @dev An observation timestamped after the block that records it.
+    error ObservationInFuture();
+    /// @dev A stated dimension with no observation date behind it.
+    error ObservationMissing();
+    /// @dev `Evidence.Intact` claims a match against a hash that is not there.
+    error MissingEvidenceHash();
+    /// @dev A sweep whose range is empty, inverted, or not yet mined.
+    error InvalidRange();
+    /// @dev More records attested than were observed: the claim refutes itself.
+    error AttestedExceedsObserved();
+    /// @dev More records claimed as attested than this contract has ever written.
+    error AttestedExceedsWrites();
+    /// @dev No sweep at that index, or it is already withdrawn.
+    error NoSuchSweep();
+    /// @dev A sweep starting past the frontier would leave blocks nobody claimed.
+    error CoverageGap();
+    /// @dev Only the newest standing coverage claim can be withdrawn.
+    error NotLatestSweep();
+    /// @dev The headline verdict and the payment dimension name different outcomes.
+    error DimensionMismatch();
+
+    // ------------------------------------------------------------- modifiers
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
+        _;
+    }
+
+    modifier onlyAttester() {
+        if (msg.sender != attester) revert NotAttester();
+        _;
+    }
+
+    // ---------------------------------------------------------- construction
+
+    constructor(address initialAttester) {
+        if (initialAttester == address(0)) revert ZeroAddress();
+        owner = msg.sender;
+        attester = initialAttester;
+        emit OwnershipTransferred(address(0), msg.sender);
+        emit AttesterChanged(address(0), initialAttester);
+    }
+
+    // ---------------------------------------------------------------- admin
+
+    /// @notice Begin handing ownership to `newOwner`, who must accept it.
+    /// @dev    Two steps because the owner's only power is rotating a
+    ///         compromised attester, and a one-step transfer to an address
+    ///         nobody holds destroys that power with no way back. Passing the
+    ///         zero address cancels a pending handover.
+    function transferOwnership(address newOwner) external onlyOwner {
+        pendingOwner = newOwner;
+        emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    /// @notice Complete the handover. Only the owner-elect can call this, which
+    ///         is what proves the key exists and is controlled.
+    function acceptOwnership() external {
+        if (msg.sender != pendingOwner) revert NotPendingOwner();
+        emit OwnershipTransferred(owner, pendingOwner);
+        owner = pendingOwner;
+        pendingOwner = address(0);
+    }
+
+    function setAttester(address newAttester) external onlyOwner {
+        if (newAttester == address(0)) revert ZeroAddress();
+        emit AttesterChanged(attester, newAttester);
+        attester = newAttester;
+    }
+
+    // ---------------------------------------------------------------- write
+
+    /// @notice Record the verification outcome for one feedback record.
+    /// @dev    Re-attesting overwrites the stored state and bumps `revision`,
+    ///         deliberately: verdicts change over time — a file dies, a
+    ///         transaction appears. History lives in events, which cannot be
+    ///         rewritten. The one exception is the payment dimension, which is
+    ///         preserved when this pass reports `Payment.Unknown`: a settled
+    ///         transfer does not stop having happened because its evidence file
+    ///         later went offline.
+    function attest(Claim calldata c) public onlyAttester {
+        _validate(c);
+
+        Attestation storage a = _attestations[key(c.agentId, c.clientAddress, c.feedbackIndex)];
+        a.verdict = c.verdict;
+        // Both dimensions are preserved by an `Unknown`, not just the payment.
+        // The asymmetry was a real hazard rather than a stylistic one: a sweep
+        // driven by the narrower payment-claims export carries no documentary
+        // columns at all, so every row arrived as `Evidence.Unknown` — which
+        // means "this pass did not look at the file", not "the file is no
+        // longer intact". Writing it flipped hasIntactEvidence to false for
+        // files that were still intact, and quietly withdrew every published
+        // accusation by returning it to "not evaluated".
+        if (c.evidence != Evidence.Unknown) {
+            a.evidence = c.evidence;
+            // The registry's own feedbackHash is the documentary dimension's
+            // cross-reference, so it travels with it. Zeroing it separately
+            // made a checked record indistinguishable from one whose registry
+            // entry attested no hash at all — the basis of EvidenceUnbound.
+            a.evidenceHash = c.evidenceHash;
+            // The date travels with the dimension it describes, and only with
+            // it. `_validate` has already refused a stated dimension with no
+            // date, so this cannot blank one that was set.
+            a.evidenceObservedAt = c.observedAt;
+        }
+        if (c.payment != Payment.Unknown) {
+            a.payment = c.payment;
+            a.amount = c.amount;
+            a.paymentToken = c.paymentToken;
+            a.amountDecimals = c.amountDecimals;
+            a.paymentTx = c.paymentTx;
+            a.paymentObservedAt = c.observedAt;
+        }
+        // The write itself, which is a liveness signal and nothing more: it
+        // says the service touched this record, never that it re-checked what
+        // you are about to read.
+        a.checkedAt = uint40(block.timestamp);
+        unchecked { a.revision += 1; }
+
+        unchecked { totalAttestations += 1; }
+
+        emit FeedbackAttested(
+            c.agentId,
+            c.clientAddress,
+            c.verdict,
+            c.feedbackIndex,
+            a.evidence,
+            a.payment,
+            c.evidence,
+            c.payment,
+            a.paymentTx,
+            a.evidenceHash,
+            a.amount,
+            a.paymentToken,
+            a.evidenceObservedAt,
+            a.revision
+        );
+
+        // After the record's own event, never before it: an indexer reading the
+        // log in order sees the attestation, then the payment detail that
+        // belongs to it, rather than a detail for a record it has not met.
+        if (c.payment != Payment.Unknown) {
+            emit PaymentAttested(
+                c.agentId,
+                c.clientAddress,
+                c.payment,
+                c.feedbackIndex,
+                c.paymentTx,
+                c.amount,
+                c.paymentToken,
+                c.amountDecimals,
+                c.observedAt
+            );
+        }
+    }
+
+    /// @notice Batch form of {attest}, for backfills and periodic sweeps.
+    /// @dev    All-or-nothing: one bad claim reverts the batch rather than
+    ///         writing the rest. A partially applied backfill is indistinguishable
+    ///         from a complete one at read time, and the resume marker would then
+    ///         record progress that did not happen.
+    function attestBatch(Claim[] calldata claims) external onlyAttester {
+        uint256 n = claims.length;
+        if (n == 0) revert EmptyBatch();
+        for (uint256 i = 0; i < n; i++) {
+            attest(claims[i]);
+        }
+    }
+
+    /// @dev Rungs are claims about the world, and some of them are refuted by
+    ///      their own payload. A verdict saying the transaction was found while
+    ///      carrying no transaction hash, or an attributed payment that moved
+    ///      nothing, is not a verdict — it is a bug reaching the ledger.
+    ///
+    ///      Both dimensions are checked, not just the headline. `isPaymentBacked`
+    ///      and `isPaymentAttributed` read the PAYMENT field, so guarding only
+    ///      `verdict` left the strongest claim in the system reachable with
+    ///      nothing behind it: a claim carrying `verdict: EvidenceIntact` and
+    ///      `payment: Attributed` passed every check and then answered true to
+    ///      `isPaymentAttributed`, with no transaction and no amount.
+    function _validate(Claim calldata c) private view {
+        if (c.verdict == Verdict.None) revert InvalidVerdict();
+        if (c.observedAt > uint40(block.timestamp)) revert ObservationInFuture();
+
+        // The two dimensions must agree. A headline that names a payment
+        // outcome while the payment dimension says "nothing evaluated" is a
+        // record whose two readers disagree about the same fact.
+        Payment implied = _impliedPayment(c.verdict);
+        if (implied != Payment.Unknown && c.payment != implied) revert DimensionMismatch();
+
+        // The same rule on the documentary side. Without it a headline of
+        // `EvidenceAbsent` could carry `evidence: Intact`, and hasIntactEvidence
+        // then contradicted the verdict printed beside it.
+        Evidence impliedEvidence = _impliedEvidence(c.verdict);
+        if (impliedEvidence != Evidence.Unknown && c.evidence != impliedEvidence) revert DimensionMismatch();
+
+        // States that assert the transaction was found must name it. `NotFound`
+        // and `ForeignChain` are exempt: a malformed or unqueryable claim is
+        // exactly the case where there is no well-formed hash to carry.
+        if (_assertsTxExists(c.verdict) || _assertsTxExists(c.payment)) {
+            if (c.paymentTx == bytes32(0)) revert MissingPaymentTx();
+        }
+
+        /**
+         * `Intact` means the file resolved AND matched its attested hash. With
+         * no hash stored there is nothing it can have matched — that state is
+         * `Unbound`, and the contract defines both terms four lines apart.
+         * Without this, hasIntactEvidence answered true for a record whose
+         * evidenceHash is zero: the strongest documentary claim in the system,
+         * reachable with nothing binding the bytes to the registry entry.
+         */
+        if (c.evidence == Evidence.Intact && c.evidenceHash == bytes32(0)) revert MissingEvidenceHash();
+        if (c.verdict == Verdict.EvidenceIntact && c.evidenceHash == bytes32(0)) revert MissingEvidenceHash();
+
+        /**
+         * A dimension that is stated must say when it was looked at.
+         *
+         * `observedAt == 0` is documented as "not stated", and the merge relies
+         * on that to avoid overwriting a real date with a blank. But a claim
+         * could state a dimension AND leave the date at zero, and then the
+         * stored date still described the state that verdict had just replaced
+         * — a fresh finding wearing the previous one's timestamp, which is the
+         * exact confusion the per-dimension dates were added to end.
+         */
+        if ((c.evidence != Evidence.Unknown || c.payment != Payment.Unknown) && c.observedAt == 0) {
+            revert ObservationMissing();
+        }
+
+        // An attribution with no value is a contradiction: attribution is about
+        // who moved money, so nothing moved means nothing to attribute.
+        if (
+            (c.verdict == Verdict.PaymentAttributed || c.payment == Payment.Attributed) &&
+            c.amount == 0
+        ) revert IncoherentAmount();
+        /**
+         * And the mirror of it. A rung saying nothing relevant moved, or that
+         * the transaction was never found, cannot carry a settled amount: a
+         * consumer reading `amount` beside `PaymentNoValue` is being told two
+         * incompatible things by one record.
+         */
+        if (c.amount != 0 && (
+            c.verdict == Verdict.PaymentNoValue ||
+            c.verdict == Verdict.PaymentTxNotFound ||
+            c.verdict == Verdict.PaymentForeignChain
+        )) revert IncoherentAmount();
+        /**
+         * `NotDeclared` is the claim that the document names no payment. It
+         * therefore cannot arrive carrying one: a hash, an amount or a token
+         * beside it would be the record contradicting itself in the same
+         * write, and a consumer reading `paymentTx` next to it would be told
+         * two incompatible things. It also cannot sit under a headline that
+         * names a payment outcome — `_impliedPayment` already refuses that,
+         * and this is the other half of the same rule.
+         */
+        if (c.payment == Payment.NotDeclared && (
+            c.paymentTx != bytes32(0) || c.amount != 0 || c.paymentToken != address(0)
+        )) revert IncoherentAmount();
+
+        // An amount denominated in nothing cannot be compared to a threshold,
+        // which is the only reason to publish it.
+        if (c.amount != 0 && c.paymentToken == address(0)) revert IncoherentAmount();
+        // …and a token with no amount is the same incoherence the other way up.
+        if (c.amount == 0 && c.paymentToken != address(0)) revert IncoherentAmount();
+    }
+
+    /// @dev The payment state a headline rung implies, or `Unknown` for the
+    ///      documentary rungs, which say nothing about a payment either way.
+    function _impliedPayment(Verdict v) private pure returns (Payment) {
+        if (v == Verdict.PaymentAttributed) return Payment.Attributed;
+        if (v == Verdict.PaymentVerified) return Payment.Verified;
+        if (v == Verdict.PaymentPartyMismatch) return Payment.PartyMismatch;
+        if (v == Verdict.PaymentNoValue) return Payment.NoValue;
+        if (v == Verdict.PaymentTxFailed) return Payment.Failed;
+        if (v == Verdict.PaymentTxNotFound) return Payment.NotFound;
+        if (v == Verdict.PaymentForeignChain) return Payment.ForeignChain;
+        return Payment.Unknown;
+    }
+
+    /// @dev The documentary state a headline rung implies, or `Unknown` for the
+    ///      payment rungs, which say nothing about the file either way — that is
+    ///      exactly why the second dimension exists.
+    function _impliedEvidence(Verdict v) private pure returns (Evidence) {
+        if (v == Verdict.EvidenceIntact) return Evidence.Intact;
+        if (v == Verdict.EvidenceUnbound) return Evidence.Unbound;
+        if (v == Verdict.EvidenceUnhashed) return Evidence.Unhashed;
+        if (v == Verdict.EvidenceUnreachable) return Evidence.Unreachable;
+        if (v == Verdict.EvidenceInconclusive) return Evidence.Inconclusive;
+        if (v == Verdict.EvidenceAbsent) return Evidence.Absent;
+        return Evidence.Unknown;
+    }
+
+    function _assertsTxExists(Verdict v) private pure returns (bool) {
+        return v == Verdict.PaymentVerified || v == Verdict.PaymentAttributed ||
+               v == Verdict.PaymentPartyMismatch || v == Verdict.PaymentTxFailed ||
+               v == Verdict.PaymentNoValue;
+    }
+
+    function _assertsTxExists(Payment p) private pure returns (bool) {
+        return p == Payment.Verified || p == Payment.Attributed ||
+               p == Payment.PartyMismatch || p == Payment.Failed ||
+               p == Payment.NoValue;
+    }
+
+    /// @notice Publish what a sweep covered, so omission becomes falsifiable.
+    /// @param  fromBlock   first block of the range the attester examined
+    /// @param  toBlock     last block, inclusive; must already be mined
+    /// @param  observed    NewFeedback events the attester saw in that range
+    /// @param  attested    how many of those it wrote a verdict for
+    /// @param  recordsRoot Merkle root over the sorted `key(...)` of every
+    ///                     observed record, or zero to claim counts only
+    /// @dev    Deliberately unverifiable on chain: this contract cannot read the
+    ///         registry's history, and pretending to check would be theatre. The
+    ///         claim's value is that it is precise, dated, attributable and
+    ///         cheap to refute — re-index the range and compare. What the
+    ///         contract does enforce is that a sweep cannot contradict itself.
+    function commitSweep(
+        uint64 fromBlock,
+        uint64 toBlock,
+        uint32 observed,
+        uint32 attested,
+        bytes32 recordsRoot
+    ) external onlyAttester {
+        if (toBlock < fromBlock || toBlock >= block.number) revert InvalidRange();
+        if (attested > observed) revert AttestedExceedsObserved();
+
+        /**
+         * The frontier must advance, and must not leave a hole behind it.
+         *
+         * Re-sweeping ground already covered is the normal case — a
+         * full-history census does it on every pass — so overlap is allowed.
+         * What is not allowed is a claim that adds nothing (`toBlock` no
+         * further on than the frontier), one that starts beyond it and leaves
+         * blocks nobody claimed in between, or one that reaches back before
+         * where coverage began. That last is a different claim than "I swept
+         * further"; making it silently would move the floor of every answer
+         * this contract has already given.
+         */
+        if (_liveSweeps != 0) {
+            if (toBlock <= _coveredTo) revert InvalidRange();
+            if (fromBlock > _coveredTo + 1) revert CoverageGap();
+            if (fromBlock < _coveredFrom) revert InvalidRange();
+            _coveredTo = toBlock;
+        } else {
+            _coveredFrom = fromBlock;
+            _coveredTo = toBlock;
+        }
+        unchecked { _liveSweeps += 1; }
+
+        /**
+         * A coverage claim cannot exceed what this contract has actually
+         * recorded. It is the one quantity the contract observes for itself,
+         * and without the check `attested` was a number the attester simply
+         * asserted — published, in a field the reader takes for a measurement.
+         */
+        if (attested > totalAttestations) revert AttestedExceedsWrites();
+
+        _sweeps.push(Sweep({
+            fromBlock: fromBlock,
+            toBlock: toBlock,
+            observed: observed,
+            attested: attested,
+            committedAt: uint40(block.timestamp),
+            retracted: false,
+            recordsRoot: recordsRoot
+        }));
+
+        emit SweepCommitted(_sweeps.length - 1, fromBlock, toBlock, observed, attested, recordsRoot);
+    }
+
+    /// @notice Withdraw a coverage claim that should not have been made.
+    /// @dev    Marks, never deletes. The entry and its original numbers stay
+    ///         readable through {sweepAt}, and the withdrawal is an event of
+    ///         its own — a service correcting itself in public is doing the
+    ///         thing this ledger asks of everybody else. {isWithinSweep} stops
+    ///         counting the range, because a withdrawn claim covers nothing.
+    function retractSweep(uint256 index) external onlyAttester {
+        if (index >= _sweeps.length || _sweeps[index].retracted) revert NoSuchSweep();
+        /**
+         * Only the newest standing claim, because coverage is a frontier.
+         *
+         * Withdrawing one that later claims have already superseded would
+         * change nothing about what is covered while looking as though it did.
+         * Withdraw them in order, newest first, and each withdrawal rolls the
+         * frontier back to where the claim before it left off.
+         */
+        if (index != _liveSweeps - 1) revert NotLatestSweep();
+        _sweeps[index].retracted = true;
+        unchecked { _liveSweeps -= 1; }
+        _coveredTo = _liveSweeps == 0 ? 0 : _sweeps[_liveSweeps - 1].toBlock;
+        if (_liveSweeps == 0) _coveredFrom = 0;
+        emit SweepRetracted(index, _sweeps[index].fromBlock, _sweeps[index].toBlock);
+    }
+
+    // ----------------------------------------------------------------- read
+
+    /// @notice How many coverage claims have been published.
+    function sweepCount() external view returns (uint256) {
+        return _sweeps.length;
+    }
+
+    /// @notice One coverage claim.
+    /// @dev    Reverts `NoSuchSweep` past the end rather than on a bare array
+    ///         bounds panic, for the same reason as {latestSweep}.
+    function sweepAt(uint256 index) external view returns (Sweep memory) {
+        if (index >= _sweeps.length) revert NoSuchSweep();
+        return _sweeps[index];
+    }
+
+    /// @notice The most recent coverage claim. Reverts `NoSuchSweep` when none
+    ///         exists — a service that has never stated its coverage should
+    ///         read as having never stated it, not as having covered nothing.
+    /// @dev    The named error matters. `_sweeps[_sweeps.length - 1]` on an
+    ///         empty array reverts with Panic(0x11), an arithmetic underflow,
+    ///         which every convention treats as a contract bug: a legitimate
+    ///         operating state was indistinguishable from a broken contract.
+    function latestSweep() external view returns (Sweep memory) {
+        if (_sweeps.length == 0) revert NoSuchSweep();
+        return _sweeps[_sweeps.length - 1];
+    }
+
+    /// @notice Is this record inside a range the attester claims to have swept?
+    /// @dev    Answers "was this in scope", not "is this attested" — the two
+    ///         together are what make a `None` meaningful: never attested AND
+    ///         inside a swept range is the attester saying nothing about a
+    ///         record it says it looked at.
+    function isWithinSweep(uint64 blockNumber) external view returns (bool) {
+        // Two SLOADs, whatever the history. Coverage is one interval by
+        // construction (see the state), so there is nothing to search: the
+        // read that holds the attester to account cannot be made expensive by
+        // the attester.
+        if (_liveSweeps == 0) return false;
+        return blockNumber >= _coveredFrom && blockNumber <= _coveredTo;
+    }
+
+    /// @notice The contiguous span of blocks the attester currently claims to
+    ///         have swept, and how many standing claims make it up.
+    /// @dev    Zero live claims means coverage was never stated, or every
+    ///         statement has been withdrawn — never that nothing was covered.
+    function coverage() external view returns (uint64 from, uint64 to, uint256 liveClaims) {
+        return (_coveredFrom, _coveredTo, _liveSweeps);
+    }
+
+    /// @notice Canonical storage key, mirroring the ERC-8004 registry's tuple.
+    function key(uint256 agentId, address clientAddress, uint64 feedbackIndex)
+        public pure returns (bytes32)
+    {
+        return keccak256(abi.encode(agentId, clientAddress, feedbackIndex));
+    }
+
+    /// @notice Latest attestation. `verdict == None` means never attested.
+    function getAttestation(uint256 agentId, address clientAddress, uint64 feedbackIndex)
+        external view returns (Attestation memory)
+    {
+        return _attestations[key(agentId, clientAddress, feedbackIndex)];
+    }
+
+    /// @notice Strictest integration surface: was this feedback paid for, by
+    ///         this reviewer, to this agent?
+    /// @dev    This is the question {isPaymentBacked} was assumed to answer and
+    ///         did not. Use it when a payment is meant to be a barrier to entry,
+    ///         because it is the only rung an adversary cannot reach by citing
+    ///         somebody else's transaction.
+    function isPaymentAttributed(uint256 agentId, address clientAddress, uint64 feedbackIndex)
+        external view returns (bool)
+    {
+        return _attestations[key(agentId, clientAddress, feedbackIndex)].payment == Payment.Attributed;
+    }
+
+    /// @notice Did the transaction this feedback names settle, without the
+    ///         chain contradicting the document that names it?
+    /// @dev    Weaker than it sounds, and deliberately kept: a settled payment
+    ///         cited by a review says something happened, not that it happened
+    ///         between these two parties. Anyone may name any real transfer. For
+    ///         a filter rather than a signal, use {isPaymentAttributed}.
+    ///
+    ///         Weaker, but not unconditional, and the exact line matters.
+    ///         `PartyMismatch` is excluded even though its transaction did
+    ///         settle: there the document says A paid B and the chain says C
+    ///         paid D, so the citation is not merely unproven, it is refuted.
+    ///         A record whose own evidence the chain contradicts must not read
+    ///         as backed by anything. `Failed` and `NoValue` are excluded for
+    ///         the plainer reason that nothing settled. So the question this
+    ///         answers, precisely: the cited transaction exists, succeeded,
+    ///         moved value, and nothing about it contradicts the claim.
+    function isPaymentBacked(uint256 agentId, address clientAddress, uint64 feedbackIndex)
+        external view returns (bool)
+    {
+        Payment p = _attestations[key(agentId, clientAddress, feedbackIndex)].payment;
+        return p == Payment.Attributed || p == Payment.Verified;
+    }
+
+    /// @notice An attributed payment of at least `minAmount` of `token`.
+    /// @dev    `movedValue` has no floor, so a transfer of one millionth of a
+    ///         dollar reaches the same rung as a five-hundred-dollar settlement.
+    ///         Publishing the amount lets a consumer set its own floor in the
+    ///         same call rather than trusting the rung to imply one.
+    function isPaymentAttributedAtLeast(
+        uint256 agentId,
+        address clientAddress,
+        uint64 feedbackIndex,
+        uint96 minAmount,
+        address token
+    ) external view returns (bool) {
+        Attestation storage a = _attestations[key(agentId, clientAddress, feedbackIndex)];
+        return a.payment == Payment.Attributed && a.amount >= minAmount && a.paymentToken == token;
+    }
+
+    /// @notice Did the evidence file resolve and match the hash attested for it?
+    /// @dev    Answers only about the file. v2 also returned true for
+    ///         `PaymentVerified`, which asserts nothing about any file, so a
+    ///         router filtering on this held a document guarantee it had not
+    ///         been given. The two questions are now asked separately.
+    function hasIntactEvidence(uint256 agentId, address clientAddress, uint64 feedbackIndex)
+        external view returns (bool)
+    {
+        return _attestations[key(agentId, clientAddress, feedbackIndex)].evidence == Evidence.Intact;
+    }
+
+    /// @notice The documentary dimension on its own.
+    function evidenceOf(uint256 agentId, address clientAddress, uint64 feedbackIndex)
+        external view returns (Evidence)
+    {
+        return _attestations[key(agentId, clientAddress, feedbackIndex)].evidence;
+    }
+
+    /// @notice The payment dimension on its own.
+    function paymentOf(uint256 agentId, address clientAddress, uint64 feedbackIndex)
+        external view returns (Payment)
+    {
+        return _attestations[key(agentId, clientAddress, feedbackIndex)].payment;
+    }
+}
