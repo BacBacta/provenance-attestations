@@ -72,7 +72,17 @@ function auditHeader() {
 
 const REAL_HEADER = auditHeader()
 const HEADER = REAL_HEADER ?? HEADER_FALLBACK
-if (!REAL_HEADER) console.log('  (audit repository not checked out alongside — using the recorded header)')
+/**
+ * Say it loudly. When the audit repository is not checked out this falls back
+ * to a recorded copy of the header, and the assertion below then compares that
+ * copy with itself — a guard against export drift that cannot detect export
+ * drift, reporting ✓ either way.
+ */
+if (!REAL_HEADER) {
+  console.log('  ! the audit repository is not checked out alongside.')
+  console.log('    The export header is a RECORDED COPY, so the drift assertion below')
+  console.log('    compares it with itself and proves nothing.')
+}
 
 const base = {
   timestamp: '2026-08-20T17:34:44Z', block: '73000001', agentId: '9742', reviewer: REVIEWER,
@@ -118,7 +128,12 @@ await check('a full ladder round-trips from the audit\'s writer to on-chain stat
 
   const parsed = parseClaimsCsvStrict(csvText)
   assert.equal(parsed.malformed.length, 0)
-  assert.deepEqual(parsed.header, HEADER, 'the export header this service expects has not drifted')
+  assert.deepEqual(
+    parsed.header, HEADER,
+    REAL_HEADER
+      ? 'the export header this service expects has drifted from the audit\'s'
+      : 'header self-comparison (audit repo absent) — this assertion proves nothing here',
+  )
   assert.ok(HEADER.includes('token'), 'the export must name the token an amount is denominated in')
 
   // No injection: whatever the audit writes is all the backfill gets. Supplying

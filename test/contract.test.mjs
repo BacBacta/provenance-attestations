@@ -1043,6 +1043,86 @@ await check('the three payment reads, on every payment state there is', async ()
   assert.equal(await never('isPaymentAttributedAtLeast', [0n, ZERO_ADDR]), false)
 })
 
+await check('every implied pairing is exercised, not two of thirteen', async () => {
+  /**
+   * The cross-dimension rule was tested on two documentary rungs out of six
+   * and two payment rungs out of seven, so most branches of _impliedPayment
+   * and _impliedEvidence could have been deleted without a test noticing. Both
+   * tables, end to end: the right dimension is accepted, a wrong one refused.
+   */
+  const { chain, addr } = await fresh()
+  const OBS = Number(BLOCK_TIMESTAMP - 86_400n)
+  const pairs = [
+    [V.EvidenceIntact, 'evidence', E.Intact], [V.EvidenceUnbound, 'evidence', E.Unbound],
+    [V.EvidenceUnhashed, 'evidence', E.Unhashed], [V.EvidenceUnreachable, 'evidence', E.Unreachable],
+    [V.EvidenceInconclusive, 'evidence', E.Inconclusive], [V.EvidenceAbsent, 'evidence', E.Absent],
+    [V.PaymentAttributed, 'payment', P.Attributed], [V.PaymentVerified, 'payment', P.Verified],
+    [V.PaymentPartyMismatch, 'payment', P.PartyMismatch], [V.PaymentNoValue, 'payment', P.NoValue],
+    [V.PaymentTxFailed, 'payment', P.Failed], [V.PaymentTxNotFound, 'payment', P.NotFound],
+    [V.PaymentForeignChain, 'payment', P.ForeignChain],
+  ]
+
+  let id = 0
+  for (const [verdict, dim, right] of pairs) {
+    const isPay = dim === 'payment'
+    const needsTx = [V.PaymentAttributed, V.PaymentVerified, V.PaymentPartyMismatch,
+                     V.PaymentNoValue, V.PaymentTxFailed].includes(verdict)
+    const needsAmount = verdict === V.PaymentAttributed
+    const base = (over) => claim({
+      agentId: BigInt(++id), feedbackIndex: 0n, verdict, observedAt: OBS,
+      evidence: isPay ? E.Unknown : right,
+      payment: isPay ? right : P.Unknown,
+      evidenceHash: isPay ? ZERO32 : EH1,
+      paymentTx: needsTx ? TX1 : ZERO32,
+      amount: needsAmount ? 1_000_000n : 0n,
+      paymentToken: needsAmount ? TOKEN : ZERO_ADDR,
+      amountDecimals: needsAmount ? 6 : 0,
+      ...over,
+    })
+    assert.equal((await chain.call(ATTESTER, addr, 'attest', [base({})])).reverted, false,
+      `the right pairing for verdict ${verdict} was refused`)
+
+    // Any other value for that dimension must be refused.
+    const wrong = isPay
+      ? { payment: right === P.Verified ? P.Attributed : P.Verified }
+      : { evidence: right === E.Intact ? E.Absent : E.Intact }
+    const r = await chain.call(ATTESTER, addr, 'attest', [base({ agentId: BigInt(++id), ...wrong })])
+    assert.equal(r.selector, ERRORS.DimensionMismatch,
+      `verdict ${verdict} accepted a contradicting ${dim}`)
+  }
+})
+
+await check('the sweep events name the entry they are about', async () => {
+  // Both tests that read a sweep log had exactly one sweep in state, so the
+  // expected index was 0 in both and neither exercised `_sweeps.length - 1`.
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 5)
+  const first = await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 5, 5, ZERO32])
+  assert.equal(only(first.logs, 'SweepCommitted').index, 0n)
+  const second = await chain.call(ATTESTER, addr, 'commitSweep', [100n, 300n, 5, 5, EH1])
+  const ev = only(second.logs, 'SweepCommitted')
+  assert.equal(ev.index, 1n)
+  assert.equal(ev.toBlock, 300n)
+  assert.equal(ev.recordsRoot, EH1)
+  const back = await chain.call(ATTESTER, addr, 'retractSweep', [1n])
+  const rv = only(back.logs, 'SweepRetracted')
+  assert.equal(rv.index, 1n, 'the withdrawal named the wrong entry')
+  assert.equal(rv.toBlock, 300n)
+})
+
+await check('PaymentAttested names the reviewer and the date it looked', async () => {
+  // Two of its nine fields — the indexed clientAddress and observedAt — were
+  // read by no assertion anywhere, and the address is a topic a consumer
+  // filters on.
+  const { chain, addr } = await fresh()
+  const OBS = Number(BLOCK_TIMESTAMP - 3_600n)
+  await chain.call(ATTESTER, addr, 'attest', [attributed({ observedAt: OBS })])
+  const r = await chain.call(ATTESTER, addr, 'attest', [attributed({ agentId: 2n, observedAt: OBS })])
+  const ev = only(r.logs, 'PaymentAttested')
+  assert.equal(ev.clientAddress.toLowerCase(), REVIEWER)
+  assert.equal(ev.observedAt, OBS)
+})
+
 console.log('\ndeclaring nothing is a finding, not a silence')
 
 await check('a document that declares no payment is distinguishable from one nobody read', async () => {

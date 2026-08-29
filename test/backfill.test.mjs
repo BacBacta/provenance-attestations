@@ -6,7 +6,7 @@
  * function, because in six months the name of the defect is the useful part.
  */
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import {
   parseClaimsCsv, parseClaimsCsvStrict, verdictOf, evidenceOf, paymentOf, paymentTxOf,
   indexCache, buildAttestations, incoherence, fingerprint, amountOf, observedAtOf,
@@ -55,23 +55,51 @@ const row = (over = {}) => ({
 
 console.log('\nCSV format — the writer and the reader are one contract')
 
-check('the two repositories carry byte-identical parsers', () => {
-  // The format's producer lives in the audit repository and its consumer here.
-  // Two copies that drift is how a torn row becomes a wrong attestation.
-  const mine = readFileSync('script/csv.mjs', 'utf8')
-  let theirs
-  for (const p of [
-    '../celo-agent-feedback-audit/src/csv.mjs',
-    '../bacbacta/celo-agent-feedback-audit/src/csv.mjs',
-  ]) {
-    try { theirs = readFileSync(p, 'utf8'); break } catch { /* not checked out here */ }
-  }
-  if (theirs === undefined) {
-    console.log('    (audit repository not checked out alongside — drift check skipped)')
-    return
-  }
-  assert.equal(mine, theirs, 'script/csv.mjs has drifted from the audit\'s src/csv.mjs')
-})
+/**
+ * Where the audit repository is, if it is checked out beside this one.
+ *
+ * The drift guards used to each locate it themselves and each `return` with a
+ * cheerful ✓ when they could not find it — so a suite that had silently
+ * stopped checking anything looked exactly like one that had checked and
+ * passed. It is resolved once, reported once, and the guards say plainly that
+ * they did not run.
+ */
+const AUDIT_REPO = [
+  '../celo-agent-feedback-audit',
+  '../bacbacta/celo-agent-feedback-audit',
+].find((p) => existsSync(`${p}/package.json`)) ?? null
+if (!AUDIT_REPO) {
+  console.log('  ! the audit repository is not checked out alongside.')
+  console.log('    The cross-repository drift guards below CANNOT RUN. A ✓ from them')
+  console.log('    would mean nothing, so they report as skipped instead.')
+}
+
+/**
+ * Every file that must stay byte-identical across the two repositories.
+ *
+ * csv.mjs had this guard; coverage.mjs shipped without one, while both copies
+ * state at the top that they must not diverge and the README repeats it as
+ * settled fact — "the same file byte for byte, so the root the indexer
+ * publishes and the root a challenger rebuilds cannot drift apart". Nothing
+ * was holding that. A divergence there does not break a test, it makes every
+ * coverage claim unverifiable by the party it is published for.
+ */
+const SHARED = [
+  ['script/csv.mjs', 'src/csv.mjs'],
+  ['script/coverage.mjs', 'src/coverage.mjs'],
+]
+
+for (const [mineRel, theirsRel] of SHARED) {
+  check(`${mineRel} is byte-identical to the audit's ${theirsRel}`, () => {
+    if (!AUDIT_REPO) {
+      console.log(`    (skipped — cannot compare ${mineRel}: no audit repository found)`)
+      return
+    }
+    const mine = readFileSync(mineRel, 'utf8')
+    const theirs = readFileSync(`${AUDIT_REPO}/${theirsRel}`, 'utf8')
+    assert.equal(mine, theirs, `${mineRel} has drifted from the audit's ${theirsRel}`)
+  })
+}
 
 check('a feedbackURI containing a newline cannot forge a second row', () => {
   // The attack: feedbackURI is written on chain by the reviewer. The old writer
