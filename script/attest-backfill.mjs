@@ -211,6 +211,23 @@ if (sweepManifest) {
     console.log(`  ${sweepManifest.observed} records observed. They are different runs.`)
   }
   /**
+   * `observed` counts records; the root commits to distinct keys.
+   *
+   * `commitSweep` publishes `observed` alongside the root, so a verifier is
+   * given a count and a commitment and told they describe the same set. They
+   * do only while every (agentId, reviewer, feedbackIndex) triple is unique —
+   * the root dedupes, the count does not. A manifest that reports both and
+   * disagrees with itself must not become an on-chain claim that they agree.
+   * Older manifests omit `observedDistinct` and are accepted as before.
+   */
+  const distinct = sweepManifest.observedDistinct
+  if (distinct !== undefined && Number(distinct) !== observed) {
+    blocking++
+    console.log(`\nMANIFEST COUNTS AND ROOT DESCRIBE DIFFERENT SETS:`)
+    console.log(`  observed ${observed} records, but the root commits to ${distinct} distinct keys.`)
+    console.log('  commitSweep would publish the first as a count of the second.')
+  }
+  /**
    * And the range must actually contain the rows. The old check compared only
    * the counts, so a manifest from another window could be published beside
    * this export's verdicts: records attested but outside the range claimed to
