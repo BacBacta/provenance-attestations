@@ -271,9 +271,16 @@ CONTRACT_SOURCE=contracts/deployed/ProvenanceAttestationsV3.sol npm run compile
 CONTRACT_SOURCE=contracts/deployed/ProvenanceAttestationsV2.sol npm run compile
 ```
 
-The v4 build is reproducible to the byte: the code at
-`0x050394eF…8e17` matches `out/ProvenanceAttestations.deployed.bin` exactly,
-metadata tail included.
+The v4 build is reproducible: recompiled from either path, the code **body**
+at `0x050394eF…8e17` matches `out/ProvenanceAttestations.deployed.bin` exactly.
+
+The trailing metadata hash matches only when compiling
+`contracts/ProvenanceAttestations.sol`, the path the contract was deployed
+from. solc hashes the source unit *name* along with its content, so the frozen
+copy — same bytes, different path — produces a different tail. That is why
+every bytecode comparison in this repository strips the last 106 characters
+before comparing, and why a check that demanded an exact match would fail on
+the very sources kept for verification.
 
 ## Deploy (Celo mainnet)
 
