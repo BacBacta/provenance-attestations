@@ -1241,4 +1241,175 @@ await check('a service that never stated its coverage says so, without looking b
   assert.equal((await chain.call(STRANGER, addr, 'sweepAt', [1n])).selector, ERRORS.NoSuchSweep)
 })
 
+console.log('\nwithdrawing a coverage claim, more than once')
+
+/**
+ * v4 could not do this at all.
+ *
+ * `_sweeps` only grows — a retraction MARKS its entry and never removes it —
+ * while `_liveSweeps` shrinks. v4's guard compared the caller's array index
+ * against `_liveSweeps - 1`, so the two namespaces diverged permanently at the
+ * first retraction: the newest standing claim was refused with NotLatestSweep,
+ * the index the guard demanded was refused with NoSuchSweep, and the frontier
+ * roll-back read `_sweeps[_liveSweeps - 1]` — often an entry that was itself
+ * withdrawn. Since the frontier can only ever advance, retractSweep is the ONLY
+ * way to withdraw a claim, so one use made every published range irrevocable.
+ */
+await check('the newest standing claim can be withdrawn, after any history', async () => {
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 1)
+  const commit = (f, t) => chain.call(ATTESTER, addr, 'commitSweep', [BigInt(f), BigInt(t), 10, 1, ZERO32])
+  const retract = (i) => chain.call(ATTESTER, addr, 'retractSweep', [BigInt(i)])
+  const cov = async () => (await chain.call(STRANGER, addr, 'coverage', [])).result
+
+  assert.equal((await commit(100, 200)).reverted, false)   // index 0
+  assert.equal((await commit(201, 300)).reverted, false)   // index 1
+  assert.equal((await retract(1)).reverted, false)
+  assert.equal((await commit(201, 400)).reverted, false)   // index 2
+  assert.equal((await commit(401, 500)).reverted, false)   // index 3
+
+  // The newest STANDING claim is #3. v4 refused exactly this.
+  assert.equal((await retract(3)).reverted, false, 'the newest standing claim must be withdrawable')
+  // And a claim later ones have superseded is refused, which is the guard's job.
+  assert.equal((await retract(1)).selector, ERRORS.NoSuchSweep, 'already withdrawn')
+  assert.equal((await retract(0)).selector, ERRORS.NotLatestSweep, 'superseded by #2')
+
+  // #2 is now the newest standing one.
+  assert.equal((await retract(2)).reverted, false)
+  const [from, to, live] = await cov()
+  assert.deepEqual([from, to, live], [100n, 200n, 1n], 'the frontier is what sweep #0 left')
+})
+
+await check('the frontier restores exactly, and only standing claims are covered', async () => {
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 1)
+  const commit = (f, t) => chain.call(ATTESTER, addr, 'commitSweep', [BigInt(f), BigInt(t), 10, 1, ZERO32])
+  const retract = (i) => chain.call(ATTESTER, addr, 'retractSweep', [BigInt(i)])
+  const within = async (b) => (await chain.call(STRANGER, addr, 'isWithinSweep', [BigInt(b)])).result
+
+  await commit(100, 200)   // 0
+  await commit(201, 300)   // 1
+  await retract(1)
+  await commit(201, 400)   // 2
+  await commit(401, 500)   // 3
+  await retract(3)
+
+  /**
+   * v4 reported (100, 300) here — taken from WITHDRAWN sweep #1 — so
+   * isWithinSweep(250) answered true for a block no standing claim covered and
+   * isWithinSweep(450) answered false for one that a standing claim did. That
+   * read is the contract's whole accountability argument: `None` inside a swept
+   * range is the accusation. It lied in both directions.
+   */
+  const [from, to] = (await chain.call(STRANGER, addr, 'coverage', [])).result
+  assert.deepEqual([from, to], [100n, 400n], 'the frontier is sweep #2, the newest standing one')
+  assert.equal(await within(250), true, '250 is inside standing sweep #2')
+  assert.equal(await within(450), false, '450 was only ever covered by the withdrawn #3')
+
+  // Withdrawal marks, never erases: every entry is still readable and dated.
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 4n)
+  for (const [i, want] of [[0, false], [1, true], [2, false], [3, true]]) {
+    const sw = (await chain.call(STRANGER, addr, 'sweepAt', [BigInt(i)])).result
+    assert.equal(sw.retracted, want, `sweep #${i} retracted flag`)
+  }
+})
+
+await check('unwinding every claim returns the ledger to having stated nothing', async () => {
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 1)
+  for (const [f, t] of [[100, 199], [200, 299], [300, 399]]) {
+    await chain.call(ATTESTER, addr, 'commitSweep', [BigInt(f), BigInt(t), 10, 1, ZERO32])
+  }
+  for (const i of [2, 1, 0]) {
+    assert.equal((await chain.call(ATTESTER, addr, 'retractSweep', [BigInt(i)])).reverted, false)
+  }
+  const [from, to, live] = (await chain.call(STRANGER, addr, 'coverage', [])).result
+  assert.deepEqual([from, to, live], [0n, 0n, 0n], 'no claim stands, so nothing is covered')
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [150n])).result, false)
+  // …and stating coverage again starts from a clean floor, not from the old one.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'commitSweep', [900n, 999n, 10, 1, ZERO32])).reverted, false,
+    'with nothing standing, any range is a first claim',
+  )
+})
+
+console.log('\ntwo guards that read one dimension where their siblings read both')
+
+/**
+ * The mirror amount guard was the only payload invariant in `_validate` reading
+ * `verdict` alone. The two-dimension model exists so the payment dimension can
+ * travel under a documentary headline, so that omission left the whole shape
+ * reachable: `evidence: Intact` with `payment: NoValue` and a settled amount.
+ */
+await check('a rung saying nothing settled cannot carry an amount, from either dimension', async () => {
+  const { chain, addr } = await fresh()
+  // NotFound and ForeignChain are the two reachable here: they are the payment
+  // states that do NOT assert the transaction exists, so nothing else refuses
+  // them first. (NoValue does assert it, and MissingPaymentTx catches a missing
+  // hash before this guard is reached — which is luck, not this guard working,
+  // so it is covered below with a hash supplied.)
+  for (const [p, label] of [[P.NotFound, 'NotFound'], [P.ForeignChain, 'ForeignChain']]) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: V.EvidenceIntact, evidence: E.Intact, evidenceHash: EH1,
+      payment: p, amount: 1_000_000n, paymentToken: TOKEN, amountDecimals: 6,
+    })])
+    assert.equal(r.selector, ERRORS.IncoherentAmount, `payment: ${label} must be guarded too`)
+  }
+  // NoValue with a transaction named: now only the amount is incoherent.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: V.EvidenceIntact, evidence: E.Intact, evidenceHash: EH1,
+      payment: P.NoValue, paymentTx: TX1, amount: 1_000_000n, paymentToken: TOKEN, amountDecimals: 6,
+    })])).selector,
+    ERRORS.IncoherentAmount,
+    'a transaction that moved nothing cannot carry a settled sum',
+  )
+  // The headline form was already caught, and still is.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: V.PaymentNoValue, evidence: E.Unknown, payment: P.NoValue,
+      paymentTx: TX1, amount: 1_000_000n, paymentToken: TOKEN,
+    })])).selector,
+    ERRORS.IncoherentAmount,
+  )
+  // And the honest shape still passes: a real amount under a rung that settled.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: V.PaymentVerified, evidence: E.Unknown, payment: P.Verified,
+      paymentTx: TX1, amount: 1_000_000n, paymentToken: TOKEN, amountDecimals: 6,
+    })])).reverted, false,
+    'the guard must not refuse a settled payment that really carries a sum',
+  )
+})
+
+/**
+ * `Unhashed` means the file resolved and CONTRADICTS its attested hash. With no
+ * hash stored there is nothing it can have contradicted — that state is
+ * `Unbound`. v4 guarded only `Intact`, so the ledger accepted an accusation
+ * whose subject was not written down, byte-identical in its hash field to the
+ * benign rung meaning no hash was ever attested.
+ */
+await check('a rung that contradicts an attested hash must name the hash', async () => {
+  const { chain, addr } = await fresh()
+  for (const [v, e] of [[V.EvidenceUnhashed, E.Unhashed], [V.EvidenceIntact, E.Intact]]) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: v, evidence: e, evidenceHash: ZERO32,
+    })])
+    assert.equal(r.selector, ERRORS.MissingEvidenceHash, 'a hash-relative rung needs a hash')
+  }
+  // Unbound is the rung for "no hash was attested", and it is still accepted.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: V.EvidenceUnbound, evidence: E.Unbound, evidenceHash: ZERO32,
+    })])).reverted, false,
+    'Unbound is exactly the state a zero hash describes',
+  )
+  // And Unhashed with a real hash is the honest accusation, still allowed.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: V.EvidenceUnhashed, evidence: E.Unhashed, evidenceHash: EH1,
+    })])).reverted, false,
+  )
+})
+
 console.log(`\n${passed} passed\n`)

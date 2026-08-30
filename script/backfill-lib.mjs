@@ -576,13 +576,25 @@ export function incoherence({
   if ((verdict === Verdict.PaymentAttributed || payment === Payment.Attributed) && amount === 0n) {
     return 'PaymentAttributed with no amount: attribution is about who moved money'
   }
-  // …and the mirror: a rung saying nothing relevant moved cannot carry a sum.
+  /**
+   * …and the mirror: a rung saying nothing relevant moved cannot carry a sum.
+   *
+   * From EITHER dimension. This read the headline alone, exactly as the
+   * contract's own guard did, four lines under a comment saying the opposite —
+   * so `evidence: Intact` with `payment: NoValue` and a settled amount passed
+   * both validators and reached the ledger. The two-dimension model exists so
+   * the payment dimension can travel under a documentary headline; a guard
+   * that only reads the headline does not cover it.
+   */
   if (amount !== 0n && (
     verdict === Verdict.PaymentNoValue ||
     verdict === Verdict.PaymentTxNotFound ||
-    verdict === Verdict.PaymentForeignChain
+    verdict === Verdict.PaymentForeignChain ||
+    payment === Payment.NoValue ||
+    payment === Payment.NotFound ||
+    payment === Payment.ForeignChain
   )) {
-    return `${VERDICT_NAMES[verdict]} says nothing settled, so it cannot carry an amount`
+    return 'a rung saying nothing settled cannot carry an amount'
   }
   if (amount !== 0n && paymentToken === ZERO_ADDRESS) {
     return 'an amount denominated in no token cannot be compared to a threshold'
@@ -600,6 +612,18 @@ export function incoherence({
   if ((evidence === Evidence.Intact || verdict === Verdict.EvidenceIntact) &&
       (evidenceHash === undefined || evidenceHash === ZERO32)) {
     return 'EvidenceIntact claims a match against a hash that is not there'
+  }
+  /**
+   * And the same for the rung that accuses instead of confirming.
+   *
+   * `Unhashed` says the bytes CONTRADICT an attested hash. With no hash there
+   * is nothing they can have contradicted, and the row is byte-identical in
+   * its hash field to `Unbound`, which means no hash was ever attested. An
+   * accusation nobody can check is the one thing this ledger must not publish.
+   */
+  if ((evidence === Evidence.Unhashed || verdict === Verdict.EvidenceUnhashed) &&
+      (evidenceHash === undefined || evidenceHash === ZERO32)) {
+    return 'EvidenceUnhashed contradicts a hash that is not there'
   }
   // A dimension that is stated must say when it was looked at.
   if (observedAt !== undefined && observedAt === 0 &&

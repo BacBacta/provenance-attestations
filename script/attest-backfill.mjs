@@ -21,7 +21,7 @@ import { celo } from 'viem/chains'
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import {
   parseClaimsCsvStrict, indexCache, buildAttestations, chunk,
-  fingerprint, toClaimStruct, VERDICT_NAMES,
+  fingerprint, toClaimStruct, VERDICT_NAMES, Verdict,
 } from './backfill-lib.mjs'
 
 const DRY = process.env.DRY_RUN !== '0'
@@ -79,10 +79,37 @@ if (usesJoin) {
   cache = indexCache(readFileSync(CACHE, 'utf8').split('\n').filter(Boolean))
 }
 
-const { rows, missing, rejected, skipped, duplicateTxs, cacheCollisions } = buildAttestations(claims, cache)
+const { rows: allRows, missing, rejected, skipped, duplicateTxs, cacheCollisions } =
+  buildAttestations(claims, cache)
+
+/**
+ * `SKIP_ABSENT=1` — leave out the verdicts a reader can already derive.
+ *
+ * Measured on the full export: 9,628 of the 20,097 rows are `EvidenceAbsent`
+ * and they cost 622,994,080 gas — 125.84 CELO at 202 gwei, 50.25% of the whole
+ * backfill, and the most expensive documentary class per row because each one
+ * stores a 32-byte hash that is a verbatim copy of the registry's own
+ * `feedbackHash`.
+ *
+ * They are a bijection with a predicate over the registry event itself: every
+ * row with `feedbackURI == "" && feedbackHash != 0` has this rung, and every
+ * row with this rung has those fields — 9,628 of 9,628 in both directions.
+ * Anyone can reproduce the entire set from the registry with no attester input,
+ * so attesting them buys a consumer nothing and spends half the budget.
+ *
+ * It is off by default, because "cheaper" is not by itself a reason to publish
+ * less, and the choice belongs to whoever is paying. What it must never do is
+ * become invisible: the skipped count is printed, and the coverage claim's
+ * `attested` figure counts only what was actually written, so the ledger still
+ * says exactly how much of the range it spoke about.
+ */
+const SKIP_ABSENT = process.env.SKIP_ABSENT === '1'
+const ABSENT = Verdict.EvidenceAbsent
+const absentRows = SKIP_ABSENT ? allRows.filter((r) => r.verdict === ABSENT) : []
+const rows = SKIP_ABSENT ? allRows.filter((r) => r.verdict !== ABSENT) : allRows
 
 const byVerdict = {}
-for (const r of rows) {
+for (const r of allRows) {
   const name = VERDICT_NAMES[r.verdict] ?? r.verdict
   byVerdict[name] = (byVerdict[name] ?? 0) + 1
 }
@@ -90,12 +117,19 @@ for (const r of rows) {
 const print = fingerprint(rows)
 console.log(`input rows    ${claims.length}`)
 console.log(`index source  ${usesJoin ? 'joined against the event cache (legacy export)' : 'feedbackIndex column (no join)'}`)
-console.log(`joined        ${rows.length}`)
+console.log(`joined        ${allRows.length}`)
 console.log(`fingerprint   ${print}`)
 console.log('verdicts:')
 for (const [k, n] of Object.entries(byVerdict).sort((a, b) => b[1] - a[1])) {
   console.log(`  ${k.padEnd(22)} ${String(n).padStart(6)}`)
 }
+if (SKIP_ABSENT) {
+  console.log(
+    `skipped       ${absentRows.length} EvidenceAbsent row(s) (SKIP_ABSENT=1) — derivable from\n` +
+    "              the registry event alone: feedbackURI == '' && feedbackHash != 0",
+  )
+}
+console.log(`to attest     ${rows.length}`)
 console.log(`batches       ${Math.ceil(rows.length / BATCH)} of up to ${BATCH}`)
 
 // ---------------------------------------------------------------------------

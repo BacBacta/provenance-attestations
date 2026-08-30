@@ -271,10 +271,35 @@ a transaction hash, a full amount/token slot and the second event as well.
 `isWithinSweep` is 860 gas and does not move with history — measured identical
 at 1, 64 and 1,024 sweeps.
 
-The full historical backfill is ~20,100 rows: **1.23 billion gas, at least 42
-transactions** at a 30M block limit. At 25 gwei that is roughly 31 CELO — tens
-of dollars, not cents. An earlier draft of this file said "a few transactions
-for cents"; it was wrong by three orders of magnitude and is corrected here.
+The full historical backfill is 20,097 rows. Measured end to end at the
+script's own default `BATCH_SIZE=100`: **1,239,671,371 gas across 201
+transactions** — 1,191,185,899 of execution plus 48,485,472 of calldata and
+intrinsic cost, which per-attestation figures quoted from the harness alone do
+not include.
+
+**At 202 gwei that is 250.41 CELO.** This file previously said ~31 CELO, from
+25 gwei — a price this repository's own records contradict:
+`deployments/celo.json` shows the v4 deployment paying 0.57619188 CELO for
+2,845,392 gas, which is 202.5 gwei. The figure was 8.1× low against the price
+the project actually pays, and "at least 42 transactions" was a floor assuming
+~480 claims packed into one 30M block; the default batch size produces 201, and
+a 400-claim batch already measures 25.0M gas. Batch size is not a lever worth
+pulling: from 10 to 400 rows per batch, per-claim cost moves only from 52,511
+to 50,104 gas — 0.29% of the total.
+
+**Half the spend buys nothing a reader could not derive.** 9,628 of the rows are
+`EvidenceAbsent`, costing 622,994,080 gas — 125.84 CELO, 50.25% of the total,
+and the most expensive documentary class per row because each one stores a
+32-byte hash that is a verbatim copy of the registry's own `feedbackHash`. The
+class is a bijection with a predicate over the registry event itself:
+across all 20,097 rows, every record with `feedbackURI == "" && feedbackHash
+!= 0` has that rung and every row with that rung has those fields — 9,628 out
+of 9,628 in both directions. Anyone can reproduce the set from the registry
+with no attester input at all.
+
+Skipping them (`SKIP_ABSENT=1`) leaves 10,469 rows at 616,677,291 gas —
+**124.57 CELO**, which fits inside the attester's balance instead of exceeding
+it by 109 CELO.
 
 The sources of **every deployment that is still on chain** are frozen under
 `contracts/deployed/`, and a test rebuilds each one, so an address stays
