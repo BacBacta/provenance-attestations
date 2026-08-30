@@ -5,12 +5,27 @@ validity layer the registry left out.
 
 ## Why
 
-A [full-history census](https://github.com/BacBacta/celo-agent-feedback-audit)
-of Celo's canonical ERC-8004 Reputation Registry (27,520 records, Feb–Aug 2026)
-found that evidence is almost never attached, and almost never verifiable when
-it is: 93 records declare the payment they are about; 76 of those name
-transactions that do not exist on Celo; a third of the registry attests hashes
-with no file published at all.
+A [full-history census][audit] of Celo's canonical ERC-8004 Reputation Registry
+— 27,520 records, blocks 58,396,729–76,199,590, every one of the 10,469 declared
+evidence files opened — found that evidence is almost never attached, and almost
+never verifiable when it is. **94** records declare the payment they are about;
+**76** of those name transactions that do not exist on Celo; **17** name real
+settled transfers whose parties contradict the claim; **0** are attributable to
+the reviewer and agent they are filed under. A third of the registry attests a
+hash with no file published at all.
+
+The census also asks the question independently of what a record declares, by
+reconstructing the payment from chain state: **5,755 reviews (20.9%)** are backed
+by a stablecoin transfer from that reviewer to that agent's owner before the
+review. So payment is not absent — it is undeclared. That gap is what this
+contract exists to close.
+
+Figures are from the [published snapshot][snapshot], which names the block range
+and the retrieval rules that decided its verdicts; re-running under the same two
+reproduces them.
+
+[audit]: https://github.com/BacBacta/celo-agent-feedback-audit
+[snapshot]: https://github.com/BacBacta/celo-agent-feedback-audit/blob/claude/code-critical-analysis-p39n79/docs/audit-58396729-76199590-r8-ssrf-cid-datauri-c938a5c3008b50a2.md
 
 The spec has the slot (`proofOfPayment`), the chain has the payments (Celo's
 x402 facilitator settles hundreds of thousands of attributable stablecoin
