@@ -33,13 +33,49 @@ import { celo } from 'viem/chains'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 
 const RPC = process.env.CELO_RPC_URL ?? 'https://forno.celo.org'
-const PK = process.env.PRIVATE_KEY
-if (!PK) {
-  console.error('PRIVATE_KEY is not set.\n  read -s PRIVATE_KEY && export PRIVATE_KEY')
+const RAW = process.env.PRIVATE_KEY
+if (!RAW) {
+  console.error('PRIVATE_KEY is not set.')
+  console.error('  export PRIVATE_KEY="$(tr -d \'[:space:]\' < ~/cold.key)"')
+  console.error('  …or `read -s PRIVATE_KEY && export PRIVATE_KEY`, but a terminal that')
+  console.error('  mangles a long paste will truncate it silently — the file is safer.')
   process.exit(1)
 }
 
-const account = privateKeyToAccount(PK.startsWith('0x') ? PK : `0x${PK}`)
+/**
+ * Say what is wrong with the key, without ever printing it.
+ *
+ * Passing a malformed value straight to `privateKeyToAccount` produced a
+ * `@noble/curves` stack trace reading "invalid private key, expected hex or 32
+ * bytes, got string" — which names the type it got, not the problem, and points
+ * at a file inside node_modules. On a phone, where the key arrives through a
+ * paste into `read -s` that can swallow half of it or keep a newline, that is
+ * the single most likely failure of the whole deployment and it was the least
+ * legible message in it. Nothing below reveals any part of the key: only its
+ * length, its shape, and finally the public address it derives to.
+ */
+const PK = RAW.trim()
+if (PK !== RAW) {
+  console.error('PRIVATE_KEY had surrounding whitespace; using the trimmed value.\n')
+}
+const body = PK.startsWith('0x') ? PK.slice(2) : PK
+if (!/^[0-9a-fA-F]*$/.test(body)) {
+  console.error('PRIVATE_KEY contains characters that are not hex digits.')
+  console.error('  A paste that picked up a prompt, a quote or a line break does this.')
+  process.exit(1)
+}
+if (body.length !== 64) {
+  console.error(`PRIVATE_KEY is ${body.length} hex characters; a key is 64 (32 bytes).`)
+  console.error(
+    body.length < 64
+      ? '  It was truncated — most often by a terminal paste into `read -s`.'
+      : '  Two values may have been concatenated, or a stray character came along.',
+  )
+  console.error("  Try:  export PRIVATE_KEY=\"$(tr -d '[:space:]' < ~/cold.key)\"")
+  process.exit(1)
+}
+
+const account = privateKeyToAccount(`0x${body}`)
 const attester = process.env.ATTESTER ?? account.address
 
 const abi = JSON.parse(readFileSync('out/ProvenanceAttestations.abi.json', 'utf8'))
