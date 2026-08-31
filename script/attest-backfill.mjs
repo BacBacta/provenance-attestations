@@ -318,16 +318,65 @@ if (!rows.length) {
   process.exit(1)
 }
 
-const PK = process.env.PRIVATE_KEY
-if (!PK) { console.error('PRIVATE_KEY is not set.'); process.exit(1) }
+/**
+ * Say what is wrong with the key, without ever printing it.
+ *
+ * deploy.mjs got this treatment after a malformed key produced a
+ * `@noble/curves` stack trace about elliptic curves; the backfill did not, and
+ * so produced the same trace here — after compiling, reading 20,097 rows and
+ * printing a full verdict census, which reads like everything is fine right up
+ * to the moment it is not.
+ *
+ * On a phone the key arrives by paste or clipboard, and both truncate. Nothing
+ * below reveals any part of it: only its length, its shape, and afterwards the
+ * public address it derives to, which is the thing worth checking anyway.
+ */
+const RAW_PK = process.env.PRIVATE_KEY
+if (!RAW_PK) {
+  console.error('PRIVATE_KEY is not set.')
+  console.error('  export PRIVATE_KEY="$(tr -d \'[:space:]\' < ~/hot.key)"')
+  process.exit(1)
+}
+const PK = RAW_PK.trim()
+const pkBody = PK.startsWith('0x') ? PK.slice(2) : PK
+if (!/^[0-9a-fA-F]*$/.test(pkBody)) {
+  console.error('PRIVATE_KEY contains characters that are not hex digits.')
+  console.error('  A paste that picked up a prompt, a quote or a line break does this.')
+  process.exit(1)
+}
+if (pkBody.length !== 64) {
+  console.error(`PRIVATE_KEY is ${pkBody.length} hex characters; a key is 64 (32 bytes).`)
+  console.error(
+    pkBody.length < 64
+      ? `  ${64 - pkBody.length} character(s) are missing — a truncated paste or clipboard.`
+      : '  Two values may have been concatenated, or a stray character came along.',
+  )
+  process.exit(1)
+}
 const deployment = JSON.parse(readFileSync('deployments/celo.json', 'utf8'))
 const abi = JSON.parse(readFileSync('out/ProvenanceAttestations.abi.json', 'utf8'))
-const account = privateKeyToAccount(PK.startsWith('0x') ? PK : `0x${PK}`)
+const account = privateKeyToAccount(`0x${pkBody}`)
 const pub = createPublicClient({ chain: celo, transport: http(RPC) })
 const wallet = createWalletClient({ account, chain: celo, transport: http(RPC) })
 
 console.log(`\ncontract      ${deployment.address}`)
 console.log(`attester      ${account.address}`)
+
+/**
+ * The signer must be the attester the ledger will accept.
+ *
+ * Every attest() is `onlyAttester`, so the wrong key does not write a wrong
+ * verdict — it reverts. But it reverts 105 times, one paid transaction each,
+ * and the first the operator learns of it is a failure after the money is
+ * gone. The record already says which address the contract expects.
+ */
+if (deployment.attester && account.address.toLowerCase() !== deployment.attester.toLowerCase()) {
+  console.error(`\nThis key is not the attester ${deployment.address} accepts.`)
+  console.error(`  signing as  ${account.address}`)
+  console.error(`  expected    ${deployment.attester}`)
+  console.error('  Every batch would revert, one paid transaction at a time.')
+  process.exit(1)
+}
 
 /**
  * Confirm the contract at that address speaks this ABI before spending a cent.
