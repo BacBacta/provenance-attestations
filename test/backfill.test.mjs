@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
 import {
   parseClaimsCsv, parseClaimsCsvStrict, verdictOf, evidenceOf, paymentOf, paymentTxOf,
-  indexCache, buildAttestations, incoherence, fingerprint, amountOf, observedAtOf,
+  indexCache, buildAttestations, incoherence, fingerprint, amountOf, observedAtOf, progressPathFor,
   parseUint, parseAddress, Verdict, Evidence, Payment, chunk, recordKey, merkleRoot, NOT_CHECKED,
 } from '../script/backfill-lib.mjs'
 import { escapeCell, parseCsvStrict } from '../script/csv.mjs'
@@ -606,6 +606,46 @@ check('an odd leaf is carried up, never duplicated', () => {
   const duplicated = h(h(leaves[0], leaves[1]), h(leaves[2], leaves[2]))
   assert.notEqual(carried, duplicated, 'the two constructions must actually differ')
   assert.equal(merkleRoot(leaves), carried)
+})
+
+
+check('the resume marker is named for its row set, so sweeps cannot share one', () => {
+  // The trap this replaces: one shared filename meant the completed run's
+  // marker described a different row set, the next run was refused, and the
+  // operator was told to delete it — removing the one guard that would have
+  // stopped them re-attesting 10,469 rows if the old export were ever re-run.
+  const L = 'deployments/backfill-progress.json'
+  const fresh = progressPathFor({ fingerprint: '17-abc', legacyPath: L, legacyExists: false })
+  assert.equal(fresh.path, 'deployments/backfill-progress-17-abc.json')
+
+  // A legacy marker describing a DIFFERENT row set does not capture this run.
+  const other = progressPathFor({
+    fingerprint: '17-abc', legacyPath: L, legacyExists: true, legacyFingerprint: '10469-xyz',
+  })
+  assert.equal(other.path, 'deployments/backfill-progress-17-abc.json')
+
+  // But one describing THIS row set stays authoritative, so upgrading the
+  // script mid-run does not strand a resume.
+  const mine = progressPathFor({
+    fingerprint: '10469-xyz', legacyPath: L, legacyExists: true, legacyFingerprint: '10469-xyz',
+  })
+  assert.equal(mine.path, L)
+
+  // An explicit override always wins; it is the operator saying where.
+  const forced = progressPathFor({
+    override: '/tmp/x.json', fingerprint: '17-abc', legacyPath: L,
+    legacyExists: true, legacyFingerprint: '17-abc',
+  })
+  assert.equal(forced.path, '/tmp/x.json')
+})
+
+check('two different row sets never resolve to the same marker', () => {
+  const L = 'deployments/backfill-progress.json'
+  const a = progressPathFor({ fingerprint: '10469-552ee3c839a300a4', legacyPath: L, legacyExists: false })
+  const b = progressPathFor({ fingerprint: '17-9f2c1a', legacyPath: L, legacyExists: false })
+  assert.notEqual(a.path, b.path)
+  assert.ok(a.path.includes('10469-552ee3c839a300a4'))
+  assert.ok(b.path.includes('17-9f2c1a'))
 })
 
 console.log(`\n${passed} passed\n`)

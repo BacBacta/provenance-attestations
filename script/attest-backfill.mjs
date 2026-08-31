@@ -27,7 +27,7 @@ import { celo } from 'viem/chains'
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import {
   parseClaimsCsvStrict, indexCache, buildAttestations, chunk,
-  fingerprint, toClaimStruct, VERDICT_NAMES, Verdict,
+  fingerprint, toClaimStruct, VERDICT_NAMES, Verdict, progressPathFor,
 } from './backfill-lib.mjs'
 import { findSecret, accountFrom, describeSecret, explainSecret } from './key.mjs'
 import { classifyRpcError, backoffMs, MAX_ATTEMPTS } from './rpc-retry.mjs'
@@ -51,7 +51,10 @@ if (!Number.isInteger(BATCH) || BATCH < 1) {
 }
 // Rows already written, so an interrupted backfill of ~10,000 rows resumes
 // instead of paying twice and doubling every revision counter.
-const PROGRESS = process.env.PROGRESS_FILE ?? 'deployments/backfill-progress.json'
+// Resolved after the row set is known: the marker is named for its fingerprint,
+// so a series of sweeps cannot be made to share one. See progressPathFor.
+const PROGRESS_OVERRIDE = (process.env.PROGRESS_FILE ?? '').trim()
+const LEGACY_PROGRESS = 'deployments/backfill-progress.json'
 /**
  * Escape hatch for an operator who has looked at the problems and decided to
  * proceed anyway. It exists so that "I know" is a deliberate, recorded act
@@ -123,10 +126,29 @@ for (const r of allRows) {
 }
 
 const print = fingerprint(rows)
+
+/**
+ * The marker is named for the row set it describes.
+ *
+ * A shared filename was fine while there was one backfill; the moment sweeps
+ * become a series it becomes a trap. See progressPathFor in backfill-lib.
+ */
+let legacyFingerprint = null
+if (existsSync(LEGACY_PROGRESS)) {
+  try { legacyFingerprint = JSON.parse(readFileSync(LEGACY_PROGRESS, 'utf8')).fingerprint ?? null } catch { /* unreadable is not a match */ }
+}
+const { path: PROGRESS, why: progressWhy } = progressPathFor({
+  override: PROGRESS_OVERRIDE,
+  fingerprint: print,
+  legacyPath: LEGACY_PROGRESS,
+  legacyExists: existsSync(LEGACY_PROGRESS),
+  legacyFingerprint,
+})
 console.log(`input rows    ${claims.length}`)
 console.log(`index source  ${usesJoin ? 'joined against the event cache (legacy export)' : 'feedbackIndex column (no join)'}`)
 console.log(`joined        ${allRows.length}`)
 console.log(`fingerprint   ${print}`)
+console.log(`marker        ${PROGRESS}  (${progressWhy})`)
 console.log('verdicts:')
 for (const [k, n] of Object.entries(byVerdict).sort((a, b) => b[1] - a[1])) {
   console.log(`  ${k.padEnd(22)} ${String(n).padStart(6)}`)
@@ -283,6 +305,28 @@ if (sweepManifest) {
    * disagrees with itself must not become an on-chain claim that they agree.
    * Older manifests omit `observedDistinct` and are accepted as before.
    */
+  /**
+   * The manifest and the export must come from the SAME run.
+   *
+   * The block-range check below catches a pair from wildly different sweeps,
+   * but not two runs over overlapping ranges — and the manifest is what
+   * `commitSweep` publishes, so a mismatched pair puts one run's coverage claim
+   * on another run's verdicts. `exportedRows` is the run saying how many rows
+   * it wrote, so comparing it to how many were read is exact.
+   *
+   * Compared against the PRE-FILTER count: SKIP_ABSENT changes how many rows
+   * are attested and changes nothing about how many the export contains, and
+   * comparing the filtered count here would refuse every skipped run.
+   */
+  const exported = sweepManifest.exportedRows
+  if (exported !== undefined && Number(exported) !== allRows.length) {
+    blocking++
+    console.log(`\nMANIFEST AND EXPORT ARE FROM DIFFERENT RUNS:`)
+    console.log(`  the manifest says its run exported ${exported} row(s);`)
+    console.log(`  this export holds ${allRows.length}.`)
+    console.log('  The manifest is what commitSweep publishes, so this would put one')
+    console.log("  run's coverage claim on another run's verdicts.")
+  }
   const distinct = sweepManifest.observedDistinct
   if (distinct !== undefined && Number(distinct) !== observed) {
     blocking++
