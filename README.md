@@ -369,11 +369,18 @@ it runs identically on any EVM chain.
 
 | | |
 |---|---|
-| **v4** | [`0x050394eF…8e17`](https://celo.blockscout.com/address/0x050394eF9941D30f4a2D5989Ddc158e717798e17) — block 76,143,874, **the current deployment**, empty until backfilled |
+| **v5** | [`0x86931Ae7…78a7`](https://celo.blockscout.com/address/0x86931Ae74F5cE9AA8bf818808e47102516CE78a7) — block 76,234,488, **the current deployment**, empty until backfilled |
 | owner | `0x6141C737…C4ef` — cold, its only power is rotating the attester |
 | attester | `0xC2Dc6B28…972A` — signs verdicts, and nothing else |
+| **v4** | [`0x050394eF…8e17`](https://celo.blockscout.com/address/0x050394eF9941D30f4a2D5989Ddc158e717798e17) — block 76,143,874, still live, never written to. Superseded because its coverage frontier could be withdrawn exactly once and then reported ranges no standing claim covered; see the v5 commit |
 | **v3** | [`0xAD6202F6…6807`](https://celo.blockscout.com/address/0xAD6202F635e97f17f193524CCa66B5D288ab6807) — block 76,082,999, still live, never written to |
 | **v2** | [`0x3ed53c9b…01ab`](https://celo.blockscout.com/address/0x3ed53c9bf7f7b5026eae83e4d62abdbd748a01ab) — still live, holds the 20,097 verdicts, one key for both roles |
+
+v4 and v3 were both deployed and never written to, which is the point of
+reviewing a contract while it is still empty: a defect found then costs a
+redeploy and nothing else. v5 cost 2,988,830 gas — 0.605 CELO at 202.5 gwei —
+and its bytecode matches this repository's build byte for byte, metadata tail
+included.
 
 The key split the counter-analysis asked for is in v3's creation transaction
 itself, not a later handover. `npm run deploy` refuses to run at all while
