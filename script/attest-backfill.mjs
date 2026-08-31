@@ -30,6 +30,7 @@ import {
   fingerprint, toClaimStruct, VERDICT_NAMES, Verdict,
 } from './backfill-lib.mjs'
 import { findSecret, accountFrom, describeSecret, explainSecret } from './key.mjs'
+import { classifyRpcError, backoffMs, MAX_ATTEMPTS } from './rpc-retry.mjs'
 
 const DRY = process.env.DRY_RUN !== '0'
 const RPC = process.env.CELO_RPC_URL ?? 'https://forno.celo.org'
@@ -630,9 +631,95 @@ const marker = (extra) => JSON.stringify({
   ...extra,
 }, null, 2)
 
+/**
+ * Count the nonce here, rather than asking the node for it before every send.
+ *
+ * forno is several nodes behind one address, and `eth_getTransactionCount` is
+ * not monotonic across them: a run died on its twentieth batch with `nonce too
+ * low: next nonce 229, tx nonce 228` — a node that had not yet seen the
+ * transaction just mined handed back a number one behind, and viem, which asks
+ * afresh for every send when no nonce is given, believed it. 1,900 attestations
+ * were already on chain and 18.29 CELO already spent. Nothing was corrupt; the
+ * run simply stopped, which for a ledger meant to be complete is its own kind
+ * of failure.
+ *
+ * Read once, then count. The chain is the authority on where to START; after
+ * that this loop knows exactly how many transactions it has broadcast, and no
+ * stale read can tell it otherwise.
+ */
+let nonce = await pub.getTransactionCount({ address: account.address, blockTag: 'pending' })
+console.log(`nonce         ${nonce}  (counted locally from here, not re-read per send)`)
+
+/**
+ * Send one transaction, surviving the failures that are not refusals.
+ *
+ * Retrying the same batch at the same nonce is safe in both directions: if the
+ * node never saw the first attempt it sees this one, and if it did see it the
+ * duplicate is refused by nonce rather than executed twice.
+ */
+async function send(label, params) {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const hash = await wallet.writeContract({ ...params, nonce })
+      nonce += 1
+      return hash
+    } catch (err) {
+      const { kind, text } = classifyRpcError(err)
+      if (kind === 'fatal') throw err
+      if (attempt === MAX_ATTEMPTS) {
+        console.error(`\n${label}: giving up after ${MAX_ATTEMPTS} attempts — ${kind}`)
+        throw err
+      }
+      if (kind === 'nonce-low') {
+        /**
+         * The chain is ahead of the count. That means a transaction from this
+         * address landed that this loop did not count — an earlier attempt whose
+         * answer was lost, or another process signing with the same key. Adopt
+         * the chain's number and try again: the batch is idempotent by content,
+         * so at worst it is written twice, and stopping here would leave the
+         * ledger half-written for a condition that resolves itself.
+         */
+        const fresh = await pub.getTransactionCount({ address: account.address, blockTag: 'pending' })
+        console.error(`\n${label}: nonce ${nonce} refused as too low; the chain says ${fresh}. Adopting it.`)
+        nonce = fresh
+        continue
+      }
+      const wait = backoffMs(attempt)
+      console.error(`${label}: ${kind} on attempt ${attempt} — retrying in ${wait / 1000}s`)
+      console.error(`  ${text.slice(0, 200)}`)
+      await new Promise((r) => setTimeout(r, wait))
+    }
+  }
+  throw new Error('unreachable')
+}
+
+/**
+ * Waiting for a receipt has its own transient failures, and they are not the
+ * same event as a failed send: the transaction is already broadcast, so the
+ * only question is whether this process gets to see its outcome. Giving up here
+ * leaves the marker holding `inFlight`, which stops the NEXT run too until an
+ * operator checks the transaction by hand.
+ */
+async function awaitReceipt(label, hash) {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      return await pub.waitForTransactionReceipt({ hash, timeout: 180_000, retryCount: 10 })
+    } catch (err) {
+      const { kind, text } = classifyRpcError(err)
+      if (attempt === MAX_ATTEMPTS) throw err
+      const wait = backoffMs(attempt)
+      console.error(`${label}: receipt not seen (${kind}) on attempt ${attempt} — retrying in ${wait / 1000}s`)
+      console.error(`  ${text.slice(0, 200)}`)
+      await new Promise((r) => setTimeout(r, wait))
+    }
+  }
+  throw new Error('unreachable')
+}
+
 for (const [i, part] of allBatches.entries()) {
   const fromRow = written
-  const hash = await wallet.writeContract({
+  const label = `batch ${i + 1}/${allBatches.length}`
+  const hash = await send(label, {
     address: deployment.address,
     abi,
     functionName: 'attestBatch',
@@ -646,8 +733,8 @@ for (const [i, part] of allBatches.entries()) {
    */
   writeFileSync(PROGRESS, marker({ inFlight: { hash, fromRow, toRow: fromRow + part.length } }))
 
-  const receipt = await pub.waitForTransactionReceipt({ hash })
-  console.log(`batch ${i + 1}/${allBatches.length}: ${part.length} attestations — ${receipt.status} — ${hash}`)
+  const receipt = await awaitReceipt(label, hash)
+  console.log(`${label}: ${part.length} attestations — ${receipt.status} — ${hash}`)
   if (receipt.status !== 'success') process.exit(1)
   written += part.length
   writeFileSync(PROGRESS, marker({}))
@@ -680,7 +767,7 @@ if (written === rows.length) {
    * receipt was lost has landed or will land, and a second commitSweep over
    * the same frontier is refused on chain anyway.
    */
-  const hash = await wallet.writeContract({
+  const hash = await send('coverage claim', {
     address: deployment.address,
     abi,
     functionName: 'commitSweep',
@@ -688,7 +775,7 @@ if (written === rows.length) {
   })
   sweepCommitted = true
   writeFileSync(PROGRESS, marker({ sweepInFlight: hash }))
-  const receipt = await pub.waitForTransactionReceipt({ hash })
+  const receipt = await awaitReceipt('coverage claim', hash)
   console.log(`  committed — ${receipt.status} — ${hash}`)
   if (receipt.status !== 'success') {
     sweepCommitted = false
