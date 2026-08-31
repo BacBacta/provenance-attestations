@@ -66,6 +66,33 @@ both. `evidence` and `payment` are recorded side by side, so you can ask
 answered. The payment dimension is sticky: a settled transfer does not stop
 having happened because its evidence file went offline years later.
 
+## Reading the rungs without over-reading them
+
+Two rung names promise less than they appear to, and both are worth knowing
+before a consumer filters on them.
+
+**`EvidenceUnreachable` is not a synonym for 404.** It holds three different
+failures, which on the full-history run split 3,305 / 1,410 / 193: a host
+answering 404 or 410, so it asserts the file is absent; a host answering
+perfectly well with something that is not a JSON document — an HTML landing
+page, a soft-404 — so there is no evidence file at that pointer even though the
+site is up; and a pointer the attester cannot resolve at all, an unknown scheme
+or a malformed URI, decided locally with no host contacted. All three mean "no
+usable evidence document here", which is why they share a rung. Only the first
+means the host said so. If you are going to tell someone their files are gone,
+read the `note` column of the published `evidence.csv` first — about a third of
+the time their site is up and serving.
+
+**`EvidenceInconclusive` is deliberately not a finding.** Rate limits, timeouts,
+403s, 5xx, every gateway busy: these prove nothing about the file. Counting them
+as dead links would fabricate findings about files that are alive. Treat this
+rung as "not measured", never as "bad".
+
+**`Payment.Unknown` is not "no payment".** It means the pass had nothing to say
+and the contract preserved whatever it already knew. Read the `payment` rung;
+never infer from `paymentTx === 0`. `Payment.NotDeclared` is the one that says
+the file was read and declares no payment at all.
+
 ## Explained silence
 
 The first backfill deliberately omitted 9,628 records whose rung is decided by

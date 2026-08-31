@@ -59,8 +59,30 @@ keep their meanings exactly. 10–13 are new.
 | `6 PaymentTxFailed` | declared payment exists but reverted |
 | `7 PaymentNoValue` | declared payment succeeded but moved nothing relevant |
 | `13 EvidenceInconclusive` | retrieval failed in a way that proves nothing |
-| `8 EvidenceUnreachable` | a host answered that the declared file is gone |
+| `8 EvidenceUnreachable` | no evidence document at that pointer — see below, it is not a synonym for 404 |
 | `9 EvidenceAbsent` | a hash was attested with no file published at all |
+
+> **`EvidenceUnreachable` holds three different failures.** On the full-history
+> run they split **3,305 / 1,410 / 193**: a host answering 404 or 410, so it
+> asserts the file is absent; a host answering perfectly well with something
+> that is *not* a JSON document — an HTML landing page, a soft-404 — so there is
+> no evidence file at that pointer even though the host is up; and a pointer
+> this attester cannot resolve at all, an unknown scheme or a malformed URI,
+> decided locally with no host contacted. All three mean "no evidence document
+> here", which is why they share a rung; only the first means the host said so.
+>
+> Reading the rung as "dead link" therefore attributes to absent hosts about a
+> third of a count that is mostly about hosts answering with the wrong thing —
+> and it is a mistake with consequences: telling a project their files are gone
+> when their site is up and serving is both wrong and unhelpful. The published
+> `evidence.csv` carries the reason per record in its `note` column (`HTTP 404`,
+> `not JSON`, `unresolvable URI scheme: …`), and the audit's report prints the
+> split. A consumer that needs the distinction reads the note; a consumer that
+> needs "is there a usable document" reads the rung.
+>
+> `EvidenceInconclusive` is deliberately **not** in here: rate limits, timeouts,
+> 403s and 5xx prove nothing about the file, and folding them in would fabricate
+> findings about files that are alive.
 
 ### Two dimensions, not one
 
