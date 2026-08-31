@@ -59,8 +59,30 @@ keep their meanings exactly. 10–13 are new.
 | `6 PaymentTxFailed` | declared payment exists but reverted |
 | `7 PaymentNoValue` | declared payment succeeded but moved nothing relevant |
 | `13 EvidenceInconclusive` | retrieval failed in a way that proves nothing |
-| `8 EvidenceUnreachable` | a host answered that the declared file is gone |
+| `8 EvidenceUnreachable` | no evidence document at that pointer — see below, it is not a synonym for 404 |
 | `9 EvidenceAbsent` | a hash was attested with no file published at all |
+
+> **`EvidenceUnreachable` holds three different failures.** On the full-history
+> run they split **3,305 / 1,410 / 193**: a host answering 404 or 410, so it
+> asserts the file is absent; a host answering perfectly well with something
+> that is *not* a JSON document — an HTML landing page, a soft-404 — so there is
+> no evidence file at that pointer even though the host is up; and a pointer
+> this attester cannot resolve at all, an unknown scheme or a malformed URI,
+> decided locally with no host contacted. All three mean "no evidence document
+> here", which is why they share a rung; only the first means the host said so.
+>
+> Reading the rung as "dead link" therefore attributes to absent hosts about a
+> third of a count that is mostly about hosts answering with the wrong thing —
+> and it is a mistake with consequences: telling a project their files are gone
+> when their site is up and serving is both wrong and unhelpful. The published
+> `evidence.csv` carries the reason per record in its `note` column (`HTTP 404`,
+> `not JSON`, `unresolvable URI scheme: …`), and the audit's report prints the
+> split. A consumer that needs the distinction reads the note; a consumer that
+> needs "is there a usable document" reads the rung.
+>
+> `EvidenceInconclusive` is deliberately **not** in here: rate limits, timeouts,
+> 403s and 5xx prove nothing about the file, and folding them in would fabricate
+> findings about files that are alive.
 
 ### Two dimensions, not one
 
@@ -494,7 +516,28 @@ reads both as "not checked yet" is misled in the other. Making that difference
 answerable is the entire reason `commitSweep` exists, and nothing in the
 per-record read surface makes it hard to ignore.
 
-`script/ledger.mjs` does. It resolves a three-way standing — `attested`,
+It is published as **[`provenance-ledger`](packages/ledger)**, so a consumer
+installs it rather than copying it:
+
+```
+npm install provenance-ledger viem
+```
+
+```js
+import { readLedger, summarise, contract } from 'provenance-ledger'
+const rows = await readLedger(client, contract, records)
+// standing: 'attested' | 'silent' | 'uncovered'
+```
+
+The package pins the deployed address and ships a read-only ABI — no write
+selector, so it cannot be mistaken for a way to attest. Tests assert both
+against the compiled contract, and the enums against the contract source
+rung by rung, because a package that pins an ABI and an address is a package a
+repository can silently move underneath. This project has already been caught by
+exactly that: its own ERC-8004 registration went on naming a superseded contract
+while resolving perfectly.
+
+`packages/ledger/ledger.mjs` resolves a three-way standing — `attested`,
 `silent`, `uncovered` — and names a third case that is the easiest of all to
 misread: silence the registry event itself explains. The first backfill left out
 9,628 records whose rung is decided by `feedbackURI == "" && feedbackHash != 0`,

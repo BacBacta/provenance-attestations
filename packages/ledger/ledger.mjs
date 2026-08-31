@@ -26,10 +26,7 @@
  * when the caller supplies the registry fields, silence that the registry
  * itself explains is labelled as such rather than counted against the attester.
  */
-import { Verdict, Evidence, Payment, VERDICT_NAMES } from './backfill-lib.mjs'
-
-export const EVIDENCE_NAMES = Object.fromEntries(Object.entries(Evidence).map(([k, v]) => [v, k]))
-export const PAYMENT_NAMES = Object.fromEntries(Object.entries(Payment).map(([k, v]) => [v, k]))
+import { VERDICT_NAMES, EVIDENCE_NAMES, PAYMENT_NAMES } from './enums.mjs'
 
 /**
  * What the ledger says about one record.
