@@ -2,8 +2,15 @@
  * Publish the audit's verdicts on chain — the first real activity of the
  * Provenance attestation contract.
  *
- *   DRY_RUN=1 npm run backfill      # default: print what would be written
- *   DRY_RUN=0 npm run backfill      # actually send
+ *   DRY_RUN=1 npm run backfill                    # default: print, send nothing
+ *   KEY_FILE=~/hot.key DRY_RUN=1 npm run backfill  # also check the key, for free
+ *   KEY_FILE=~/hot.key DRY_RUN=0 npm run backfill  # actually send
+ *
+ * KEY_FILE names a file holding either a 64-character hex key or a BIP-39
+ * mnemonic, and this script reads it directly. PRIVATE_KEY still works, but the
+ * file is what to reach for: an exported variable outlives the command that set
+ * it and cannot be looked at, which is how a run once arrived carrying fifteen
+ * stale hex characters while the right key sat unused on the same machine.
  *
  * Reads the audit's evidence.csv, which now carries `feedbackIndex` directly.
  * Older exports without that column are joined against the audit's event cache
@@ -16,13 +23,13 @@
  * by quietly inventing them either.
  */
 import { createWalletClient, createPublicClient, http } from 'viem'
-import { privateKeyToAccount } from 'viem/accounts'
 import { celo } from 'viem/chains'
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import {
   parseClaimsCsvStrict, indexCache, buildAttestations, chunk,
   fingerprint, toClaimStruct, VERDICT_NAMES, Verdict,
 } from './backfill-lib.mjs'
+import { findSecret, accountFrom, describeSecret, explainSecret } from './key.mjs'
 
 const DRY = process.env.DRY_RUN !== '0'
 const RPC = process.env.CELO_RPC_URL ?? 'https://forno.celo.org'
@@ -308,8 +315,73 @@ if (blocking && !FORCE) {
   if (!DRY) process.exit(2)
 }
 
+const deployment = JSON.parse(readFileSync('deployments/celo.json', 'utf8'))
+const abi = JSON.parse(readFileSync('out/ProvenanceAttestations.abi.json', 'utf8'))
+
+/**
+ * Resolve the signer BEFORE the dry run exits.
+ *
+ * This block used to sit after that exit, so `DRY_RUN=1` — the one command an
+ * operator runs precisely to check everything before spending anything — was
+ * the one command that never touched the key. Six attempts to get a key onto a
+ * phone each produced a spotless dry run and then failed on the real one, and
+ * every failure looked identical to the last. A dry run now answers the only
+ * question that was ever in doubt, and answers it for free.
+ */
+const found = findSecret()
+let account = null
+if (found.ok) {
+  console.log(`\nkey source    ${found.where}`)
+  if (found.alsoSet) {
+    console.log(`              PRIVATE_KEY is also set and was ignored — the file wins.`)
+  }
+  const resolved = accountFrom(found.value, deployment.attester)
+  if (!resolved.ok) {
+    console.error('')
+    for (const line of resolved.lines ?? explainSecret(describeSecret(found.value), found.where)) {
+      console.error(line)
+    }
+    console.error('\nNothing was sent.')
+    process.exit(1)
+  }
+  account = resolved.account
+  const via = resolved.kind === 'mnemonic' ? `mnemonic, account index ${resolved.index}` : 'hex private key'
+  console.log(`signing as    ${account.address}   (${via})`)
+  /**
+   * A backstop, not the check.
+   *
+   * `accountFrom` above was handed `deployment.attester` and refuses anything
+   * that does not derive it, so this cannot fire today. It stays because the
+   * cost of being wrong here is 105 paid transactions that each revert — every
+   * attest() is `onlyAttester`, so a wrong key does not write a wrong verdict,
+   * it burns gas 105 times and tells the operator afterwards. A check that
+   * survives someone loosening the one above is worth three lines.
+   *
+   * The live check against the chain itself, rather than the record, is further
+   * down: `attester()` read from the contract.
+   */
+  if (deployment.attester && account.address.toLowerCase() !== deployment.attester.toLowerCase()) {
+    console.error(`\nThis key is not the attester ${deployment.address} accepts.`)
+    console.error(`  signing as  ${account.address}`)
+    console.error(`  expected    ${deployment.attester}`)
+    console.error('  Every batch would revert, one paid transaction at a time.')
+    process.exit(1)
+  }
+  console.log(`              matches the attester recorded for this contract`)
+} else if (found.reason !== 'unset') {
+  console.error(`\nkey source    ${found.where}`)
+  for (const line of found.lines) console.error(`  ${line}`)
+  process.exit(1)
+}
+
 if (DRY) {
-  console.log('\nDRY RUN — nothing sent. Re-run with DRY_RUN=0 to write on chain.')
+  if (account) {
+    console.log('\nDRY RUN — nothing sent. The key above is the one this contract accepts.')
+  } else {
+    console.log('\nDRY RUN — nothing sent. No key was supplied, so none was checked.')
+    console.log('  KEY_FILE=~/hot.key DRY_RUN=1 npm run backfill   checks it here, for free.')
+  }
+  console.log('Re-run with DRY_RUN=0 to write on chain.')
   process.exit(blocking ? 2 : 0)
 }
 
@@ -319,64 +391,29 @@ if (!rows.length) {
 }
 
 /**
- * Say what is wrong with the key, without ever printing it.
+ * Name a FILE, not an environment variable.
  *
- * deploy.mjs got this treatment after a malformed key produced a
- * `@noble/curves` stack trace about elliptic curves; the backfill did not, and
- * so produced the same trace here — after compiling, reading 20,097 rows and
- * printing a full verdict census, which reads like everything is fine right up
- * to the moment it is not.
- *
- * On a phone the key arrives by paste or clipboard, and both truncate. Nothing
- * below reveals any part of it: only its length, its shape, and afterwards the
- * public address it derives to, which is the thing worth checking anyway.
+ * PRIVATE_KEY is still honoured, but it is no longer what this script asks
+ * for. An exported variable outlives the command that set it, outlives the
+ * operator's belief that they have replaced it, and cannot be looked at; the
+ * run this message was written for was refused because it carried fifteen hex
+ * characters left over from a diagnostic the day before, while the correct key
+ * sat unused on the same phone.
  */
-const RAW_PK = process.env.PRIVATE_KEY
-if (!RAW_PK) {
-  console.error('PRIVATE_KEY is not set.')
-  console.error('  export PRIVATE_KEY="$(tr -d \'[:space:]\' < ~/hot.key)"')
+if (!account) {
+  console.error('\nNo key supplied. Point KEY_FILE at a file holding the attester key:')
+  console.error('  KEY_FILE=~/hot.key DRY_RUN=0 SKIP_ABSENT=1 npm run backfill')
+  console.error('\nThe file may contain either form a wallet exports:')
+  console.error('  a 64-character hex key, or a BIP-39 mnemonic of 12 to 24 words.')
+  console.error('It is read by this script directly — no export, no quoting, and')
+  console.error('nothing left behind in the shell to go stale.')
   process.exit(1)
 }
-const PK = RAW_PK.trim()
-const pkBody = PK.startsWith('0x') ? PK.slice(2) : PK
-if (!/^[0-9a-fA-F]*$/.test(pkBody)) {
-  console.error('PRIVATE_KEY contains characters that are not hex digits.')
-  console.error('  A paste that picked up a prompt, a quote or a line break does this.')
-  process.exit(1)
-}
-if (pkBody.length !== 64) {
-  console.error(`PRIVATE_KEY is ${pkBody.length} hex characters; a key is 64 (32 bytes).`)
-  console.error(
-    pkBody.length < 64
-      ? `  ${64 - pkBody.length} character(s) are missing — a truncated paste or clipboard.`
-      : '  Two values may have been concatenated, or a stray character came along.',
-  )
-  process.exit(1)
-}
-const deployment = JSON.parse(readFileSync('deployments/celo.json', 'utf8'))
-const abi = JSON.parse(readFileSync('out/ProvenanceAttestations.abi.json', 'utf8'))
-const account = privateKeyToAccount(`0x${pkBody}`)
+
 const pub = createPublicClient({ chain: celo, transport: http(RPC) })
 const wallet = createWalletClient({ account, chain: celo, transport: http(RPC) })
 
 console.log(`\ncontract      ${deployment.address}`)
-console.log(`attester      ${account.address}`)
-
-/**
- * The signer must be the attester the ledger will accept.
- *
- * Every attest() is `onlyAttester`, so the wrong key does not write a wrong
- * verdict — it reverts. But it reverts 105 times, one paid transaction each,
- * and the first the operator learns of it is a failure after the money is
- * gone. The record already says which address the contract expects.
- */
-if (deployment.attester && account.address.toLowerCase() !== deployment.attester.toLowerCase()) {
-  console.error(`\nThis key is not the attester ${deployment.address} accepts.`)
-  console.error(`  signing as  ${account.address}`)
-  console.error(`  expected    ${deployment.attester}`)
-  console.error('  Every batch would revert, one paid transaction at a time.')
-  process.exit(1)
-}
 
 /**
  * Confirm the contract at that address speaks this ABI before spending a cent.

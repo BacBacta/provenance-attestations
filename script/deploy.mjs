@@ -1,8 +1,12 @@
 /**
  * Deploy ProvenanceAttestations to Celo mainnet.
  *
- *   read -s PRIVATE_KEY && export PRIVATE_KEY     # avoids shell history
- *   npm run deploy
+ *   KEY_FILE=~/cold.key npm run deploy
+ *
+ * KEY_FILE names a file holding either a 64-character hex key or a BIP-39
+ * mnemonic, read by this script directly. PRIVATE_KEY still works, but a file
+ * is what to reach for: `read -s` returns empty on some terminals, a paste can
+ * truncate silently, and an exported variable outlives the command that set it.
  *
  * Uses a plain wallet transaction — no framework, no factory. The deployer
  * becomes the owner; the attester defaults to the deployer and can be rotated
@@ -28,19 +32,36 @@ import {
   createWalletClient, createPublicClient, http, formatEther, getContractAddress,
   encodeAbiParameters,
 } from 'viem'
-import { privateKeyToAccount } from 'viem/accounts'
+import { findSecret, accountFrom, describeSecret, explainSecret } from './key.mjs'
 import { celo } from 'viem/chains'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 
 const RPC = process.env.CELO_RPC_URL ?? 'https://forno.celo.org'
-const RAW = process.env.PRIVATE_KEY
-if (!RAW) {
-  console.error('PRIVATE_KEY is not set.')
-  console.error('  export PRIVATE_KEY="$(tr -d \'[:space:]\' < ~/cold.key)"')
-  console.error('  …or `read -s PRIVATE_KEY && export PRIVATE_KEY`, but a terminal that')
-  console.error('  mangles a long paste will truncate it silently — the file is safer.')
+/**
+ * Find the key, and say where it came from.
+ *
+ * The shape checks, the mnemonic support and the wording all live in key.mjs,
+ * shared with the backfill, because both scripts sign with a key that arrives
+ * from the same phone by the same fragile route — and only one of them had
+ * been taught to say what was wrong with it.
+ */
+const found = findSecret()
+if (!found.ok) {
+  if (found.reason === 'unset') {
+    console.error('No key supplied. Point KEY_FILE at a file holding the deployer key:')
+    console.error('  KEY_FILE=~/cold.key npm run deploy')
+    console.error('\nThe file may contain either form a wallet exports:')
+    console.error('  a 64-character hex key, or a BIP-39 mnemonic of 12 to 24 words.')
+    console.error('It is read by this script directly — no export, no quoting, and')
+    console.error('nothing left behind in the shell to go stale.')
+  } else {
+    console.error(`key source    ${found.where}`)
+    for (const line of found.lines) console.error(`  ${line}`)
+  }
   process.exit(1)
 }
+console.log(`key source    ${found.where}`)
+if (found.alsoSet) console.log('              PRIVATE_KEY is also set and was ignored — the file wins.')
 
 /**
  * Say what is wrong with the key, without ever printing it.
@@ -49,33 +70,26 @@ if (!RAW) {
  * `@noble/curves` stack trace reading "invalid private key, expected hex or 32
  * bytes, got string" — which names the type it got, not the problem, and points
  * at a file inside node_modules. On a phone, where the key arrives through a
- * paste into `read -s` that can swallow half of it or keep a newline, that is
- * the single most likely failure of the whole deployment and it was the least
- * legible message in it. Nothing below reveals any part of the key: only its
- * length, its shape, and finally the public address it derives to.
+ * paste that can swallow half of it or keep a newline, that is the single most
+ * likely failure of the whole deployment and it was the least legible message
+ * in it. Nothing below reveals any part of the key: only its length, its shape,
+ * and finally the public address it derives to.
+ *
+ * ATTESTER_EXPECTED is optional here and deliberately so: a deployment has no
+ * prior record to check against, and the address is printed for the operator
+ * to recognise. The backfill, which does have a record, checks against it.
  */
-const PK = RAW.trim()
-if (PK !== RAW) {
-  console.error('PRIVATE_KEY had surrounding whitespace; using the trimmed value.\n')
-}
-const body = PK.startsWith('0x') ? PK.slice(2) : PK
-if (!/^[0-9a-fA-F]*$/.test(body)) {
-  console.error('PRIVATE_KEY contains characters that are not hex digits.')
-  console.error('  A paste that picked up a prompt, a quote or a line break does this.')
+const resolved = accountFrom(found.value, process.env.EXPECT_ADDRESS)
+if (!resolved.ok) {
+  for (const line of resolved.lines ?? explainSecret(describeSecret(found.value), found.where)) {
+    console.error(line)
+  }
   process.exit(1)
 }
-if (body.length !== 64) {
-  console.error(`PRIVATE_KEY is ${body.length} hex characters; a key is 64 (32 bytes).`)
-  console.error(
-    body.length < 64
-      ? '  It was truncated — most often by a terminal paste into `read -s`.'
-      : '  Two values may have been concatenated, or a stray character came along.',
-  )
-  console.error("  Try:  export PRIVATE_KEY=\"$(tr -d '[:space:]' < ~/cold.key)\"")
-  process.exit(1)
+const account = resolved.account
+if (resolved.kind === 'mnemonic') {
+  console.log(`              derived from a mnemonic, account index ${resolved.index}`)
 }
-
-const account = privateKeyToAccount(`0x${body}`)
 const attester = process.env.ATTESTER ?? account.address
 
 const abi = JSON.parse(readFileSync('out/ProvenanceAttestations.abi.json', 'utf8'))
