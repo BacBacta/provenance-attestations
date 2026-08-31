@@ -79,7 +79,7 @@ if (usesJoin) {
   cache = indexCache(readFileSync(CACHE, 'utf8').split('\n').filter(Boolean))
 }
 
-const { rows: allRows, missing, rejected, skipped, duplicateTxs, cacheCollisions } =
+const { rows: allRows, missing, rejected, skipped, duplicateTxs, sharedTxs, cacheCollisions } =
   buildAttestations(claims, cache)
 
 /**
@@ -204,8 +204,29 @@ if (duplicateTxs.length) {
       `(${new Set(d.users.map((u) => u.reviewer)).size} reviewer(s), ${new Set(d.users.map((u) => u.agentId)).size} agent(s))`)
   }
   if (duplicateTxs.length > 10) console.log(`  … and ${duplicateTxs.length - 10} more`)
-  console.log('  A payment cited by several reviews backs at most one of them,')
-  console.log('  and nothing here can say which. Resolve upstream, or FORCE=1.')
+  console.log('  More than one of these reviews would be CREDITED by the same payment,')
+  console.log('  and nothing here can say which one it backs. Resolve upstream, or FORCE=1.')
+}
+
+/**
+ * Shared citations that credit at most one review: reported, never blocking.
+ *
+ * Removing the block on these must not remove the fact with it. They are still
+ * something about the registry an operator should see before writing — several
+ * reviews naming one transaction is worth knowing even when the verdicts are
+ * `PaymentTxNotFound` and `PaymentPartyMismatch`, which say the citation is
+ * wrong rather than that the review is backed.
+ */
+if (sharedTxs.length) {
+  const affected = sharedTxs.reduce((s, d) => s + d.users.length, 0)
+  console.log(`\nshared citations (${sharedTxs.length} transactions across ${affected} reviews) — not blocking:`)
+  for (const d of sharedTxs.slice(0, 10)) {
+    console.log(`  ${d.tx.slice(0, 18)}… cited by ${d.users.length} reviews, ` +
+      `${d.users.filter((u) => u.credited).length} of them credited by it`)
+  }
+  if (sharedTxs.length > 10) console.log(`  … and ${sharedTxs.length - 10} more`)
+  console.log('  At most one review per transaction is credited here, so no attestation')
+  console.log('  vouches for a payment another one has already spent.')
 }
 
 /**

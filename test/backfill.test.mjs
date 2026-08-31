@@ -274,6 +274,63 @@ check('one transaction backing several reviews is surfaced', () => {
   assert.equal(duplicateTxs[0].users.length, 2)
 })
 
+/**
+ * The block is about CREDIT, not about citation.
+ *
+ * "A payment backs at most one review and nothing can say which" only bites
+ * when more than one sharer is being credited. A row whose verdict is
+ * `PaymentTxNotFound` says the cited transaction does not exist, and
+ * `PaymentPartyMismatch` says it exists between other parties — statements
+ * about the citation, independently true for every review that makes it, and
+ * neither vouching for anyone.
+ *
+ * Measured on the full export: all 23 rows sharing a transaction are 18
+ * TxNotFound and 5 PartyMismatch, none Verified or Attributed. The guard was
+ * stopping the entire backfill over citations it was never written to catch.
+ */
+check('a shared citation that credits nobody is reported, not blocked', () => {
+  const cited = (over) => row({
+    rung: 'PaymentTxNotFound', evidenceRung: 'Intact', claimsPayment: 'true',
+    txExistsOnCelo: 'false', paymentVerified: 'false', claimTxHash: TX1, ...over,
+  })
+  const text = csv(HEADER, [cited({ feedbackIndex: '1' }), cited({ feedbackIndex: '2' })])
+  const { rows, duplicateTxs, sharedTxs } = buildAttestations(parseClaimsCsv(text), { map: new Map(), collisions: [] })
+  assert.equal(rows.length, 2, 'the rows are still attested')
+  assert.deepEqual(duplicateTxs, [], 'nothing is credited twice, so nothing blocks')
+  assert.equal(sharedTxs.length, 1, 'but the shared citation is still reported')
+  assert.equal(sharedTxs[0].users.length, 2)
+  assert.equal(sharedTxs[0].users.filter((u) => u.credited).length, 0)
+})
+
+check('one credited review beside uncredited citations is still not a block', () => {
+  // The transaction really does back one of them. The others say it does not
+  // exist or names other parties — which cannot be true at once, but that is a
+  // finding about the registry, not two claims on one payment.
+  const shared = (over) => row({ claimsPayment: 'true', claimTxHash: TX1, evidenceRung: 'Intact', ...over })
+  const text = csv(HEADER, [
+    shared({ feedbackIndex: '1', rung: 'PaymentVerified', txExistsOnCelo: 'true', paymentVerified: 'true', amount: '1000000', token: TOKEN, decimals: '6' }),
+    shared({ feedbackIndex: '2', rung: 'PaymentTxNotFound', txExistsOnCelo: 'false', paymentVerified: 'false' }),
+  ])
+  const { duplicateTxs, sharedTxs } = buildAttestations(parseClaimsCsv(text), { map: new Map(), collisions: [] })
+  assert.deepEqual(duplicateTxs, [], 'exactly one credited review is not a contested payment')
+  assert.equal(sharedTxs.length, 1)
+  assert.equal(sharedTxs[0].users.filter((u) => u.credited).length, 1)
+})
+
+check('two credited reviews on one payment still block', () => {
+  // The case the guard was written for, unchanged.
+  const paid = (over) => row({
+    rung: 'PaymentVerified', evidenceRung: 'Intact', claimsPayment: 'true',
+    txExistsOnCelo: 'true', paymentVerified: 'true', claimTxHash: TX1,
+    amount: '1000000', token: TOKEN, decimals: '6', ...over,
+  })
+  const text = csv(HEADER, [paid({ feedbackIndex: '1' }), paid({ feedbackIndex: '2' })])
+  const { duplicateTxs, sharedTxs } = buildAttestations(parseClaimsCsv(text), { map: new Map(), collisions: [] })
+  assert.equal(duplicateTxs.length, 1, 'two credited reviews on one payment is the blocking case')
+  assert.equal(duplicateTxs[0].users.filter((u) => u.credited).length, 2)
+  assert.deepEqual(sharedTxs, [], 'and it is not also reported as merely shared')
+})
+
 console.log('\nthe ladder, and the dimensions it used to flatten')
 
 check('the audit names the rung, and that name wins over re-derivation', () => {

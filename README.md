@@ -298,8 +298,25 @@ of 9,628 in both directions. Anyone can reproduce the set from the registry
 with no attester input at all.
 
 Skipping them (`SKIP_ABSENT=1`) leaves 10,469 rows at 616,677,291 gas —
-**124.57 CELO**, which fits inside the attester's balance instead of exceeding
-it by 109 CELO.
+**124.57 CELO**.
+
+**The recommended scope is the skip, and the reason is asymmetry rather than
+price.** Both fit the attester's balance. But skipping is reversible — the
+ledger accepts re-attestation and coverage can advance, so the rows can be
+added later — while spending is not. Attesting everything finishes the first
+pass with about 3 CELO left; skipping leaves about 129, which is a second full
+pass. The audit re-runs, gas moved between 202 and 285 gwei inside one hour
+while this was being decided, and a batch can fail and need retrying.
+
+It costs something real, and the cost should be stated rather than argued away:
+those 9,628 records will read `verdict == None` inside a range the sweep claims
+to have covered, and this contract's own documentation calls that combination
+"the attester saying nothing about a record it says it looked at". What keeps
+that honest is that the gap is declared on chain rather than hidden —
+`commitSweep` publishes `observed: 27520` beside `attested: 10469`, so a reader
+sees the difference without taking anyone's word for it, and the predicate that
+reproduces the skipped class exactly is stated above for anyone to check
+against the registry.
 
 The sources of **every deployment that is still on chain** are frozen under
 `contracts/deployed/`, and a test rebuilds each one, so an address stays

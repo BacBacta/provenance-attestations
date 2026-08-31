@@ -24,6 +24,12 @@ export function parseClaimsCsvStrict(text) {
 }
 
 /** Mirrors the on-chain enum exactly. Names are the contract's, not ours. */
+/**
+ * Verdicts and payment states under which a cited transaction CREDITS the row.
+ *
+ * Everything else that names a transaction is making a statement about the
+ * citation rather than being vouched for by it.
+ */
 export const Verdict = {
   None: 0,
   PaymentVerified: 1,
@@ -69,6 +75,16 @@ export const Payment = {
   ForeignChain: 7,
   NotDeclared: 8,
 }
+
+/**
+ * Verdicts and payment states under which a cited transaction CREDITS the row.
+ *
+ * Everything else that names a transaction is making a statement ABOUT the
+ * citation — that it does not exist, that its parties are other people — which
+ * is independently true for every review that makes it.
+ */
+const CREDITS_PAYMENT = new Set([Verdict.PaymentVerified, Verdict.PaymentAttributed])
+const CREDITS_PAYMENT_DIM = new Set([Payment.Verified, Payment.Attributed])
 
 export const VERDICT_NAMES = Object.fromEntries(Object.entries(Verdict).map(([k, v]) => [v, k]))
 
@@ -514,7 +530,26 @@ export function buildAttestations(claims, cache) {
 
     if (paymentTx !== ZERO32) {
       if (!txUsers.has(paymentTx)) txUsers.set(paymentTx, [])
-      txUsers.get(paymentTx).push({ agentId: agentId.toString(), reviewer: clientAddress, feedbackIndex })
+      txUsers.get(paymentTx).push({
+        agentId: agentId.toString(), reviewer: clientAddress, feedbackIndex,
+        /**
+         * Whether THIS row would be credited by the transaction it cites.
+         *
+         * The reuse guard exists because a payment backs at most one review and
+         * the ledger cannot say which. That reasoning only bites when more than
+         * one of the sharers is actually being credited. A row whose verdict is
+         * `PaymentTxNotFound` claims the cited transaction does not exist, and
+         * `PaymentPartyMismatch` claims it exists between other parties — both
+         * are statements ABOUT the citation, independently true for every
+         * review that makes it, and neither vouches for anybody.
+         *
+         * Measured on the full export: all 23 rows sharing a transaction are 18
+         * TxNotFound and 5 PartyMismatch, and none is Verified or Attributed.
+         * The guard was blocking the entire backfill over citations it was
+         * never written to catch.
+         */
+        credited: CREDITS_PAYMENT.has(claim.verdict) || CREDITS_PAYMENT_DIM.has(claim.payment),
+      })
     }
 
     rows.push(claim)
@@ -528,11 +563,21 @@ export function buildAttestations(claims, cache) {
    * but it must reach the operator before anything is written.
    */
   const duplicateTxs = [...txUsers.entries()]
-    .filter(([, users]) => users.length > 1)
+    .filter(([, users]) => users.filter((u) => u.credited).length > 1)
     .map(([tx, users]) => ({ tx, users }))
     .sort((a, b) => b.users.length - a.users.length)
 
-  return { rows, missing, rejected, skipped, duplicateTxs, cacheCollisions }
+  /**
+   * Shared citations that credit at most one review are still reported, just
+   * not as a reason to stop. They are a fact about the registry and the
+   * operator should see them; they are simply not the thing the block is for.
+   */
+  const sharedTxs = [...txUsers.entries()]
+    .filter(([, users]) => users.length > 1 && users.filter((u) => u.credited).length <= 1)
+    .map(([tx, users]) => ({ tx, users }))
+    .sort((a, b) => b.users.length - a.users.length)
+
+  return { rows, missing, rejected, skipped, duplicateTxs, sharedTxs, cacheCollisions }
 }
 
 /** The contract's own invariants, checked before a batch is ever assembled. */
@@ -624,6 +669,25 @@ export function incoherence({
   if ((evidence === Evidence.Unhashed || verdict === Verdict.EvidenceUnhashed) &&
       (evidenceHash === undefined || evidenceHash === ZERO32)) {
     return 'EvidenceUnhashed contradicts a hash that is not there'
+  }
+  /**
+   * And `Absent`, whose definition is "a hash was attested with no file".
+   *
+   * The deployed v5 ACCEPTS this shape — the guard was extended to Intact and
+   * Unhashed and not to Absent, and the contract is immutable, so the pipeline
+   * is where it gets refused. Measured: an Absent row with a zero hash costs
+   * 42,701 gas against 62,792 with the hash, which is a standing 39 CELO
+   * temptation across the 9,628 rows of this class. Taking it would publish
+   * "a hash was attested" in a record whose hash field reads zero —
+   * byte-identical, in the field that matters, to `Unbound`, which means no
+   * hash was ever attested. Cheaper is not a reason to say something else.
+   *
+   * This is the one place the library is deliberately stricter than the chain.
+   * The integration test enumerates that divergence rather than allowing any.
+   */
+  if ((evidence === Evidence.Absent || verdict === Verdict.EvidenceAbsent) &&
+      (evidenceHash === undefined || evidenceHash === ZERO32)) {
+    return 'EvidenceAbsent says a hash was attested, so it must carry the hash'
   }
   // A dimension that is stated must say when it was looked at.
   if (observedAt !== undefined && observedAt === 0 &&

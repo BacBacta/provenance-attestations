@@ -268,7 +268,7 @@ await check('a claim the library accepts is a claim the contract accepts', async
   assert.equal(r.logs.filter((l) => l.eventName === 'FeedbackAttested').length, shapes.length)
 })
 
-await check('both sides of the invariant agree, on every combination there is', async () => {
+await check('the library never accepts what the chain refuses, and is stricter only where declared', async () => {
   /**
    * incoherence() is documented as "the contract's own invariants, checked
    * before a batch is ever assembled". It was an approximation of them. An
@@ -276,11 +276,33 @@ await check('both sides of the invariant agree, on every combination there is', 
    * and the library accepted — every one a whole batch reverted mid-spend,
    * after its gas was paid, at whatever row it happened to fall on.
    *
-   * So the enumeration IS the test. 14 verdicts x 7 evidence states x 9
-   * payment states, each under four payloads, both sides asked, every
-   * disagreement reported. Neither can drift from the other again without
-   * this failing.
+   * So the enumeration IS the test. 13 verdicts x 7 evidence states x 9
+   * payment states, each under five payloads, both sides asked.
+   *
+   * The invariant is ASYMMETRIC, and saying so is the point.
+   *
+   *   library ACCEPTS what the chain refuses  -> always a failure. That is the
+   *       reverted batch, mid-spend, gas already paid. Nothing excuses it.
+   *   library REFUSES what the chain accepts  -> allowed, but only where it is
+   *       written down below. Defence in depth is legitimate; silent drift is
+   *       the thing this test exists to prevent, and an unenumerated
+   *       divergence is drift whichever direction it points.
+   *
+   * The contract is deployed and immutable, so a guard it turned out to be
+   * missing can only be added on this side. That is why the exception list
+   * exists at all — not as a convenience.
    */
+  /**
+   * `EvidenceAbsent` means "a hash was attested with no file published".
+   * Deployed v5 accepts it with evidenceHash == 0: the guard was extended to
+   * Intact and Unhashed and not to Absent. Storing the zero is 42,701 gas
+   * against 62,792 — 39 CELO across this class — and it would publish "a hash
+   * was attested" in a record whose hash field is zero, indistinguishable in
+   * that field from `Unbound`, which means no hash ever was. The library
+   * refuses it; the chain would not.
+   */
+  const ALLOWED_STRICTER = (verdict, evidence, payload) =>
+    payload === 'no hash' && (evidence === 6 || verdict === 9)
   const { chain, addr } = await fresh()
   const ZERO32 = '0x' + '00'.repeat(32)
   const ZERO_ADDR = '0x' + '00'.repeat(20)
@@ -296,7 +318,9 @@ await check('both sides of the invariant agree, on every combination there is', 
   ]
 
   let id = 0
-  const divergences = []
+  const unsafe = []
+  const undeclared = []
+  let stricter = 0
   for (let verdict = 1; verdict <= 13; verdict++) {
     for (let evidence = 0; evidence <= 6; evidence++) {
       for (let payment = 0; payment <= 8; payment++) {
@@ -312,19 +336,42 @@ await check('both sides of the invariant agree, on every combination there is', 
             amount: pl.amount, paymentToken: pl.paymentToken, amountDecimals: pl.amount > 0n ? 6 : 0,
             observedAt: pl.observedAt,
           }])
-          if (r.reverted !== libraryRefuses) {
-            divergences.push(
+          if (r.reverted && !libraryRefuses) {
+            // The unsafe direction: this row would revert a paid batch.
+            unsafe.push(
               `V${verdict} E${evidence} P${payment} [${pl.name}]: ` +
-              `contract ${r.reverted ? 'REFUSES (' + r.selector + ')' : 'accepts'}, ` +
-              `library ${libraryRefuses ? 'refuses' : 'ACCEPTS'}`,
+              `contract REFUSES (${r.selector}), library ACCEPTS`,
             )
+          } else if (!r.reverted && libraryRefuses) {
+            if (ALLOWED_STRICTER(verdict, evidence, pl.name)) stricter++
+            else {
+              undeclared.push(
+                `V${verdict} E${evidence} P${payment} [${pl.name}]: ` +
+                'contract accepts, library refuses — and this divergence is not declared',
+              )
+            }
           }
         }
       }
     }
   }
-  assert.deepEqual(divergences.slice(0, 12), [], `${divergences.length} of ${id} combinations disagree`)
+  assert.deepEqual(
+    unsafe.slice(0, 12), [],
+    `${unsafe.length} of ${id} combinations would revert a paid batch — the library must ` +
+      'never accept what the chain refuses',
+  )
+  assert.deepEqual(
+    undeclared.slice(0, 12), [],
+    `${undeclared.length} of ${id} combinations diverge without being declared above`,
+  )
   assert.ok(id >= 3_000, `only ${id} combinations were exercised`)
+  /**
+   * And the declared divergence must actually be exercised. An exception list
+   * that matches nothing is a guard that has quietly stopped guarding — the
+   * same failure as a phrase scan searching for text that no longer exists.
+   */
+  assert.ok(stricter > 0, 'the declared stricter-than-chain case was never reached')
+  console.log(`      (${stricter} combinations where the library is deliberately stricter)`)
 })
 
 await check('a library-rejected claim is one the contract would have refused too', async () => {
