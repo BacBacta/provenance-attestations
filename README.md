@@ -581,6 +581,40 @@ The two dimensions side by side are what a single verdict slot could never say:
 every one of those records has `Intact` evidence — the file was fetched and its
 hash matches the registry — and not one has a backed payment.
 
+## Sweeping again
+
+A sweep is meant to be a series, and the first two were a 286-character command
+line pasted on a phone — a pair of paths naming an export and a coverage
+manifest that **must** come from the same run, where one wrong character would
+publish one run's coverage claim over another run's verdicts.
+
+```
+npm run sweep                                   # plan and dry run, spends nothing
+DRY_RUN=0 KEY_FILE=~/attester.key npm run sweep # write
+```
+
+Nothing is typed. The contract's own `coverage()` decides where the range
+starts — exactly one block past the frontier, because `commitSweep` refuses a
+claim that would leave a gap and refuses one that does not advance — and the
+manifest the audit just wrote decides the filenames. The head is left unswept by
+a confirmation margin, so a reorg cannot orphan an attested range.
+
+Building it found a defect worth recording, because the check that should have
+caught it did not. The audit exits early and writes nothing when a window holds
+no feedback records, so `out/` still holds the previous run and
+`publish-report` republishes it unchanged. The first version verified that the
+local manifest and the published one *agreed* — and they did, perfectly, being
+the same stale file — then handed the previous export to the backfill as this
+sweep's work. Agreement is not freshness, and only the range tells them apart.
+The check now compares the manifest's range against the range that was asked
+for. The dry run caught it before anything was sent; on chain it would have paid
+for a batch and then been refused by `InvalidRange`.
+
+One limitation this exposes: a range holding no records cannot be claimed at
+all. A coverage claim needs a root over an observed set, and the audit publishes
+none for an empty window — so the frontier stalls until records appear, and the
+sweep says so rather than inventing a claim.
+
 ## What this does not claim
 
 - **Verified is not attributed.** `PaymentVerified` says a transaction settled,
