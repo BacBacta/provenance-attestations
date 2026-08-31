@@ -1,17 +1,13 @@
 {
   "contract": "ProvenanceAttestations",
-  "version": "4.0.0",
-  "address": "0x050394eF9941D30f4a2D5989Ddc158e717798e17",
+  "version": "5.0.0",
+  "address": "0x86931Ae74F5cE9AA8bf818808e47102516CE78a7",
   "deployer": "0x6141C7377dfEF6ac8FD2156f5D9fbFb4851Ac4ef",
   "owner": "0x6141C7377dfEF6ac8FD2156f5D9fbFb4851Ac4ef",
   "attester": "0xC2Dc6B2853a8deAE5C0A6432B77F226d67B2972A",
   "constructorAttester": "0xC2Dc6B2853a8deAE5C0A6432B77F226d67B2972A",
-  "txHash": "0xa4e2e7ea9e8ee4735168ae381f20770646f92968b122470da8c06387fcf347fe",
-  "block": "76143874",
+  "txHash": "0xdbfe5dbe52bb442a5bde9d1060aaa560ecb47a3347befb201915245e90b6c7cc",
+  "block": "76234488",
   "chainId": 42220,
-  "deployedAt": "2026-08-29T23:03:52.000Z",
-  "gasUsed": "2845392",
-  "costCelo": "0.57619188",
-  "note": "Every field read back from chain state and cross-checked: the deployed bytecode matches out/ProvenanceAttestations.deployed.bin byte for byte, metadata tail included. Owner is a cold key whose only power is rotating the attester; the attester signs verdicts and holds nothing else.",
-  "supersedes": "0xAD6202F635e97f17f193524CCa66B5D288ab6807"
+  "deployedAt": "2026-08-31T00:14:08.994Z"
 }
