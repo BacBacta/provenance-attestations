@@ -1,7 +1,7 @@
 {
   "type": "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
   "name": "Provenance",
-  "description": "A validity layer for ERC-8004 reputation on Celo. Provenance verifies whether a feedback record's declared payment actually settled on chain, and publishes the verdict as an on-chain attestation. It scores nothing and ranks nothing: it is the input other scorers, marketplaces and routers read to weight feedback by something harder than assertion. A full-history census of this registry (27,520 records) found 93 records declaring a payment, of which 17 name a transaction that exists — the gap this service closes.",
+  "description": "A validity layer for ERC-8004 reputation on Celo. Provenance verifies whether a feedback record's declared evidence file and declared payment hold up — the file fetched and hashed, the transaction read from the chain it names — and publishes the verdict as an on-chain attestation, two dimensions per record. It scores nothing and ranks nothing: it is the input other scorers, marketplaces and routers read to weight feedback by something harder than assertion. Measured on 2026-08-31 across 27,538 registry records: 111 payment claims, of which 0 were verified and attributed to their declared parties and 93 name transactions that do not exist on the chain they name. 10,486 verdicts are on chain under two contiguous coverage claims that publish what the indexer observed beside what the attester wrote, so the attester's own silence is checkable.",
   "image": "https://raw.githubusercontent.com/BacBacta/provenance-attestations/main/assets/provenance.svg",
   "services": [
     {
@@ -10,15 +10,21 @@
     },
     {
       "name": "attestation-contract",
-      "endpoint": "eip155:42220:0x3ed53c9bf7f7b5026eae83e4d62abdbd748a01ab",
-      "version": "0.1.0"
+      "endpoint": "eip155:42220:0x86931Ae74F5cE9AA8bf818808e47102516CE78a7",
+      "version": "5.0.0"
     },
     {
       "name": "audit-methodology",
       "endpoint": "https://github.com/BacBacta/celo-agent-feedback-audit"
+    },
+    {
+      "name": "consumer-reader",
+      "endpoint": "https://github.com/BacBacta/provenance-attestations#read-it-back"
     }
   ],
-  "supportedTrust": ["reputation"],
+  "supportedTrust": [
+    "reputation"
+  ],
   "x402Support": false,
   "active": true
 }
