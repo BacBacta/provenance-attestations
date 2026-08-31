@@ -767,3 +767,58 @@ export function progressPathFor({ override, fingerprint, legacyPath, legacyExist
   }
   return { path: legacyPath.replace(/\.json$/, `-${fingerprint}.json`), why: 'named for this row set' }
 }
+
+/**
+ * May a run with no rows still publish a coverage claim?
+ *
+ * Zero rows is normally a failure that looks like a success — the guard exists
+ * because an export the parser rejected in full would otherwise be reported as a
+ * completed backfill. Exactly one case is different: a range that genuinely
+ * contained no records.
+ *
+ * Refusing that case had a cost nobody priced. A quiet range could not be
+ * claimed, so the coverage frontier stalled through every quiet period and a
+ * reader could no longer tell "nothing happened in these blocks" from "the
+ * attester stopped" — the one distinction the coverage mechanism exists to
+ * publish. `commitSweep` accepts observed 0 and attested 0 with a zero root,
+ * verified against the deployed bytecode.
+ *
+ * The manifest decides, never the row count alone: an empty export beside a
+ * manifest that observed records is still the original failure, and saying so
+ * is the difference between a claim of nothing and a silent loss of everything.
+ */
+export function zeroRowsAllowed({ manifest, rowCount }) {
+  if (rowCount > 0) return { allowed: true, reason: 'rows to write' }
+  if (!manifest) {
+    return { allowed: false, reason: 'no-manifest', lines: [
+      'Nothing to write, and no coverage manifest either, so there is nothing to',
+      'claim and nothing to write.',
+    ] }
+  }
+  /**
+   * `Number(null)` is 0 and `Number('')` is 0, so coercing first would read a
+   * manifest that says nothing at all as one that observed nothing — and
+   * license a claim over the range on the strength of two absent fields. The
+   * value must be a number or a string of digits before it means zero.
+   */
+  const count = (v) =>
+    typeof v === 'number' ? v
+      : typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v)
+        : NaN
+  const observed = count(manifest.observed)
+  const exported = count(manifest.exportedRows)
+  if (!Number.isFinite(observed) || !Number.isFinite(exported)) {
+    return { allowed: false, reason: 'unreadable-manifest', lines: [
+      'Nothing to write, and the manifest does not say how much its run observed.',
+      `  observed ${JSON.stringify(manifest.observed)} · exported ${JSON.stringify(manifest.exportedRows)}`,
+    ] }
+  }
+  if (observed === 0 && exported === 0) {
+    return { allowed: true, reason: 'empty-range' }
+  }
+  return { allowed: false, reason: 'parse-failure', lines: [
+    'Nothing to write. Refusing to report a completed backfill of zero rows.',
+    `The manifest says its run observed ${observed} record(s) and exported ${exported},`,
+    'so an empty export is a parse failure, not an empty range.',
+  ] }
+}

@@ -27,7 +27,7 @@ import { celo } from 'viem/chains'
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import {
   parseClaimsCsvStrict, indexCache, buildAttestations, chunk,
-  fingerprint, toClaimStruct, VERDICT_NAMES, Verdict, progressPathFor,
+  fingerprint, toClaimStruct, VERDICT_NAMES, Verdict, progressPathFor, zeroRowsAllowed,
 } from './backfill-lib.mjs'
 import { findSecret, accountFrom, describeSecret, explainSecret } from './key.mjs'
 import { classifyRpcError, backoffMs, MAX_ATTEMPTS } from './rpc-retry.mjs'
@@ -430,9 +430,22 @@ if (DRY) {
   process.exit(blocking ? 2 : 0)
 }
 
-if (!rows.length) {
-  console.error('\nNothing to write. Refusing to report a completed backfill of zero rows.')
+/**
+ * Zero rows is a mistake, unless the manifest says the range held nothing.
+ * The decision is `zeroRowsAllowed` in backfill-lib, kept pure and tested there
+ * because it is the one guard whose correct answer changed: it was written to
+ * refuse every empty run, and refusing the genuinely-empty case stalled the
+ * coverage frontier through every quiet period.
+ */
+const zero = zeroRowsAllowed({ manifest: sweepManifest, rowCount: rows.length })
+if (!zero.allowed) {
+  console.error('')
+  for (const l of zero.lines) console.error(l)
   process.exit(1)
+}
+if (zero.reason === 'empty-range') {
+  console.log('\nThis range held no records. Nothing to attest; publishing the coverage')
+  console.log('claim alone, so the frontier advances and the silence stays checkable.')
 }
 
 /**
@@ -647,12 +660,22 @@ if (doneRows) console.log(`resuming after ${doneRows} completed row(s); ${pendin
  * records whether the sweep itself was committed.
  */
 if (!pending.length) {
-  console.log('\nEvery row is already on chain according to the marker.')
+  /**
+   * Two different situations reach this point and they are not the same fact.
+   * Saying "every row is already on chain according to the marker" about a range
+   * that never had a row is a sentence that is true of the count and false about
+   * the world — the failure this project keeps finding, in its own output.
+   */
+  if (!rows.length) {
+    console.log('\nNo rows to write: this range held no records at all.')
+  } else {
+    console.log('\nEvery row is already on chain according to the marker.')
+  }
   if (sweepCommitted) {
     console.log('Its coverage claim was committed too — nothing left to do.')
     process.exit(0)
   }
-  console.log('Its coverage claim was NOT committed. Publishing it now.')
+  console.log('Publishing the coverage claim now.')
 }
 
 const allBatches = chunk(pending, BATCH)

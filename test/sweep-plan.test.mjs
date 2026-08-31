@@ -165,4 +165,24 @@ check('a manifest missing its range is stale, not accepted by default', () => {
   assert.ok(manifestMatchesPlan({}, plan).lines.join(' ').includes('(none)'))
 })
 
+check('the bracket is never inverted, at any row count including zero', () => {
+  // It was. At zero rows the low end carried a flat per-transaction cost the
+  // high end did not, and the sweep printed "0.0346 – 0.0304 CELO" — a range
+  // whose low exceeds its high, which is a figure contradicting its own label.
+  for (const rows of [0, 1, 17, 99, 100, 101, 10_469, 20_114]) {
+    const e = estimate({ rows, gasPriceWei: 202_500_000_000n })
+    assert.ok(e.lowGas <= e.highGas, `inverted at ${rows} rows: ${e.lowGas} > ${e.highGas}`)
+    assert.ok(e.lowWei <= e.highWei, `inverted in wei at ${rows} rows`)
+  }
+})
+
+check('an empty claim is bracketed by both measurements of commitSweep', () => {
+  // 83,284 gas against a fresh contract in the harness, 137,392 on chain for
+  // the second claim. A bracket that excluded either would be a bracket in name.
+  const e = estimate({ rows: 0, gasPriceWei: 202_500_000_000n })
+  assert.ok(e.lowGas <= 83_284n, `low ${e.lowGas} should not exceed the cheapest measured`)
+  assert.ok(e.highGas >= 137_392n, `high ${e.highGas} should cover the dearest measured`)
+})
+
+
 console.log(`\n${passed} passed\n`)

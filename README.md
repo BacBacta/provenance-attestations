@@ -610,10 +610,24 @@ The check now compares the manifest's range against the range that was asked
 for. The dry run caught it before anything was sent; on chain it would have paid
 for a batch and then been refused by `InvalidRange`.
 
-One limitation this exposes: a range holding no records cannot be claimed at
-all. A coverage claim needs a root over an observed set, and the audit publishes
-none for an empty window — so the frontier stalls until records appear, and the
-sweep says so rather than inventing a claim.
+Building it also exposed a hole shaped exactly like the thing coverage exists to
+prevent, and that one is now closed. A range holding no records could not be
+claimed at all: the audit wrote no manifest for an empty window, so the frontier
+stalled through every quiet period — and a reader could no longer tell "nothing
+happened in these blocks" from "the attester stopped". `commitSweep` accepts
+`observed 0, attested 0` with a zero root (83,284 gas, checked against the
+deployed bytecode), and `merkleRoot` already returned `bytes32(0)` for an empty
+set, so the convention was there and only the tooling refused. An empty range now
+publishes a claim of nothing, which is as falsifiable as any other: re-index it,
+and a single record refutes it.
+
+The backfill's zero-row guard stays, because the failure that produced it — an
+export the parser rejected in full, reported as a completed backfill — has not
+gone away. The manifest now decides which case it is: `observed 0, exported 0`
+is an empty range, anything else beside an empty export is still a parse
+failure. Absent counts are refused rather than coerced, because `Number(null)`
+is `0` and would otherwise license a claim on the strength of two missing
+fields.
 
 ## What this does not claim
 

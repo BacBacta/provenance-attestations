@@ -76,13 +76,25 @@ export function snapshotBase(manifest) {
   }
 }
 
-/** Rough cost, from what the two completed sweeps actually paid. */
+/**
+ * Rough cost, bracketed, from what the completed sweeps actually paid.
+ *
+ * 93,579 gas per row measured on payment-bearing rows and 47,529 on the
+ * cheapest — a blend of the two is what misled an earlier estimate by 45%, so
+ * this quotes a range and never a number.
+ *
+ * The first version added a flat per-transaction cost to the low end and a
+ * per-batch one to the high end, which inverted the bracket at zero rows: it
+ * printed "0.0346 – 0.0304 CELO", a low above its own high. Both ends now count
+ * the same batches, and the coverage claim's own cost is itself a range,
+ * bracketing the 83,284 gas measured against a fresh contract and the 137,392
+ * measured on chain.
+ */
 export function estimate({ rows, gasPriceWei }) {
-  // 93,579 gas/row measured on payment-bearing rows, 47,529 on the cheapest.
-  // The blend is what misled a previous estimate by 45%, so this quotes a range
-  // rather than a number, and says which end a payment-heavy window lands on.
-  const lo = BigInt(rows) * 47_529n + 21_000n + 150_000n
-  const hi = BigInt(rows) * 93_579n + BigInt(Math.ceil(rows / 100)) * 21_000n + 150_000n
+  const n = BigInt(rows)
+  const batches = BigInt(Math.ceil(rows / 100))
+  const lo = n * 47_529n + batches * 21_000n + 80_000n
+  const hi = n * 93_579n + batches * 21_000n + 160_000n
   return { lowGas: lo, highGas: hi, lowWei: lo * BigInt(gasPriceWei), highWei: hi * BigInt(gasPriceWei) }
 }
 

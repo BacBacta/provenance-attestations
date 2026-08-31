@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
 import {
   parseClaimsCsv, parseClaimsCsvStrict, verdictOf, evidenceOf, paymentOf, paymentTxOf,
-  indexCache, buildAttestations, incoherence, fingerprint, amountOf, observedAtOf, progressPathFor,
+  indexCache, buildAttestations, incoherence, fingerprint, amountOf, observedAtOf, progressPathFor, zeroRowsAllowed,
   parseUint, parseAddress, Verdict, Evidence, Payment, chunk, recordKey, merkleRoot, NOT_CHECKED,
 } from '../script/backfill-lib.mjs'
 import { escapeCell, parseCsvStrict } from '../script/csv.mjs'
@@ -647,5 +647,52 @@ check('two different row sets never resolve to the same marker', () => {
   assert.ok(a.path.includes('10469-552ee3c839a300a4'))
   assert.ok(b.path.includes('17-9f2c1a'))
 })
+
+check('a run with rows is allowed without consulting the manifest', () => {
+  assert.equal(zeroRowsAllowed({ manifest: null, rowCount: 5 }).allowed, true)
+})
+
+check('an empty range may publish a claim of nothing', () => {
+  // The frontier must keep advancing through quiet periods. Otherwise a reader
+  // cannot tell "nothing happened in these blocks" from "the attester stopped",
+  // which is the one distinction publishing coverage exists to make. The
+  // deployed contract accepts observed 0 / attested 0 with a zero root.
+  const r = zeroRowsAllowed({ manifest: { observed: 0, exportedRows: 0 }, rowCount: 0 })
+  assert.equal(r.allowed, true)
+  assert.equal(r.reason, 'empty-range')
+})
+
+check('an empty export beside a manifest that saw records is still a parse failure', () => {
+  // The original reason for the guard, which has not gone away: an export the
+  // parser rejected in full would otherwise be reported as a completed backfill.
+  const r = zeroRowsAllowed({ manifest: { observed: 27520, exportedRows: 20097 }, rowCount: 0 })
+  assert.equal(r.allowed, false)
+  assert.equal(r.reason, 'parse-failure')
+  const t = r.lines.join(' ')
+  assert.ok(t.includes('27520') && t.includes('20097'), t)
+  assert.ok(t.includes('not an empty range'), t)
+})
+
+check('observed 0 with rows exported is incoherent and refused', () => {
+  // A manifest that observed nothing cannot have exported something. Accepting
+  // it would let a hand-edited manifest license a claim over any range.
+  assert.equal(zeroRowsAllowed({ manifest: { observed: 0, exportedRows: 17 }, rowCount: 0 }).allowed, false)
+})
+
+check('no manifest at all is refused, with nothing to claim', () => {
+  const r = zeroRowsAllowed({ manifest: null, rowCount: 0 })
+  assert.equal(r.allowed, false)
+  assert.equal(r.reason, 'no-manifest')
+})
+
+check('a manifest whose counts are not numbers is refused, not coerced', () => {
+  // Number(undefined) is NaN and Number(null) is 0 — the second would silently
+  // license an empty claim from a manifest that says nothing at all.
+  for (const m of [{}, { observed: 'many', exportedRows: 0 }, { observed: null, exportedRows: null }]) {
+    const r = zeroRowsAllowed({ manifest: m, rowCount: 0 })
+    assert.equal(r.allowed, false, JSON.stringify(m))
+  }
+})
+
 
 console.log(`\n${passed} passed\n`)
