@@ -477,6 +477,67 @@ rows being written would produce a root over the attested subset, which proves
 only what the events already prove and would quietly answer a different question
 than the one `recordsRoot` is documented to answer.
 
+## Read it back
+
+The contract answers one question per record and answers it honestly, but the
+honest answer is ambiguous in a way that will mislead anyone who reads it
+straight. `getAttestation` returns `None` for a record nobody attested — and
+`None` means two entirely different things:
+
+- the record's block is inside a standing sweep, so the attester **did** claim
+  to look at that range and wrote nothing about this record; or
+- the record's block is outside every standing sweep, so the attester **never
+  claimed to look at all**.
+
+A consumer that reads both as "no evidence" is misled in one direction; one that
+reads both as "not checked yet" is misled in the other. Making that difference
+answerable is the entire reason `commitSweep` exists, and nothing in the
+per-record read surface makes it hard to ignore.
+
+`script/ledger.mjs` does. It resolves a three-way standing — `attested`,
+`silent`, `uncovered` — and names a third case that is the easiest of all to
+misread: silence the registry event itself explains. The first backfill left out
+9,628 records whose rung is decided by `feedbackURI == "" && feedbackHash != 0`,
+and those read `None` inside a claimed sweep, which looks exactly like the
+attester ducking a question. It is not, and the reader holds the event that
+proves it.
+
+```
+npm run read -- --agent 9734
+npm run read -- --reviewer 0x1030…13C7 --limit 40
+npm run read -- --agent 9734 --scan 20000     # plus a live tail
+```
+
+Records come from the audit's published exports, because that is the shape a
+real consumer has: it already holds the records, from its own indexer or from a
+published snapshot, and wants to know what the ledger says about them. It does
+not re-scan seventeen million blocks of registry history to ask about one agent.
+`--scan N` adds the last N blocks live for anything newer than the last
+publication.
+
+Real output, against the deployed ledger:
+
+```
+block     idx  standing   verdict                evidence      payment       amount
+75658925  32   attested   PaymentPartyMismatch   Intact        PartyMismatch 0.0174
+76246058  33   uncovered  —                      —             —
+76246942  34   uncovered  —                      —             —
+
+37 record(s) read from the ledger
+  attested   32
+      PaymentTxNotFound       22
+      PaymentPartyMismatch    10
+  silent     0
+  uncovered  5
+
+5 record(s) fall outside every standing sweep. Reading those as "no
+evidence" would be wrong: the attester never claimed to have looked there.
+```
+
+The two dimensions side by side are what a single verdict slot could never say:
+every one of those records has `Intact` evidence — the file was fetched and its
+hash matches the registry — and not one has a backed payment.
+
 ## What this does not claim
 
 - **Verified is not attributed.** `PaymentVerified` says a transaction settled,

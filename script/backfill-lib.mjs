@@ -781,3 +781,31 @@ export function toClaimStruct(r) {
 // The coverage tree lives in its own module, shared byte-for-byte with the
 // audit that computes the root this service publishes.
 export { recordKey, merkleRoot } from './coverage.mjs'
+
+/**
+ * Where a run's resume marker lives.
+ *
+ * One shared filename was fine while there was one backfill. The moment sweeps
+ * become a series it is a trap: the marker from the completed run describes a
+ * different row set, so the next run is refused — correctly — with "delete it
+ * and start over". An operator who does that, and then re-runs the OLD export
+ * by habit or by a stale shell, has no marker left to stop them re-attesting
+ * 10,469 rows and paying for all of it a second time. The guard that existed to
+ * prevent exactly that was the thing they were told to remove.
+ *
+ * Naming the marker after the fingerprint of its row set removes the choice.
+ * Each run keeps its own; a completed run's marker is still there to say "every
+ * row is already on chain" if that export is ever run again; and nothing has to
+ * be deleted for the next sweep to proceed.
+ *
+ * `legacyExists` is asked rather than assumed so an upgrade mid-run does not
+ * strand a marker: if the old shared file is the one describing THIS row set,
+ * it stays authoritative for this run.
+ */
+export function progressPathFor({ override, fingerprint, legacyPath, legacyExists, legacyFingerprint }) {
+  if (override) return { path: override, why: 'PROGRESS_FILE' }
+  if (legacyExists && legacyFingerprint === fingerprint) {
+    return { path: legacyPath, why: 'legacy marker for this same row set' }
+  }
+  return { path: legacyPath.replace(/\.json$/, `-${fingerprint}.json`), why: 'named for this row set' }
+}

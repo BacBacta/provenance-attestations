@@ -3,69 +3,149 @@
   "version": "5.0.0",
   "chainId": 42220,
   "attester": "0xC2Dc6B2853a8deAE5C0A6432B77F226d67B2972A",
-  "completedAt": "2026-08-31T00:00:00.000Z",
-  "fingerprint": "10469-552ee3c839a300a4",
-  "rows": {
-    "inExport": 20097,
-    "attested": 10469,
-    "omitted": 9628,
-    "omittedReason": "SKIP_ABSENT=1. Every omitted row is EvidenceAbsent, a bijection with the registry predicate feedbackURI == '' && feedbackHash != 0 (9,628 of 9,628 in both directions), so a reader reproduces the whole set from the registry with no attester input. They would have cost 125.84 CELO, 50.25% of the full backfill. The coverage claim's `attested` counts only what was written, so the omission is stated rather than hidden."
-  },
-  "sweep": {
-    "fromBlock": 58396729,
-    "toBlock": 76199590,
-    "observed": 27520,
-    "attested": 10469,
-    "recordsRoot": "0x497f7b3a06a5a5175d803f4a356b9fd445586507de44ce670459ad7d19dfce12",
-    "txHash": "0xff627c82a7d1ac793b7fed198966634cebd6ebd5d6189acc5baf4bb35e02ad00",
-    "block": 76262891,
-    "gasUsed": 148386
-  },
-  "cost": {
-    "transactions": 106,
-    "batches": 105,
-    "batchSize": 100,
-    "gasUsed": 629314830,
-    "gasPriceWei": "202500000000",
-    "costCelo": "127.43625316579130713",
-    "attesterBalanceAfter": "126.297897688667668285",
-    "estimated": {
-      "gas": 616677291,
-      "costCelo": "124.877151427500000000",
-      "note": "Over by 12,637,539 gas (+2.05%, 2.56 CELO), and the two errors ran in opposite directions. 24,634,748 gas of the real total is transaction-level cost the in-process harness does not charge at all: 21,000 x 106 plus 22,408,748 for 3.9 MiB of calldata. Net of that, real execution was 604,680,082, so the harness OVERSTATED execution by 11,997,209 (2.0%). That second discrepancy is not decomposed here; the likely cause is that each batch was simulated against a fresh contract, pricing the shared counter slots as first writes every time."
+  "sweeps": [
+    {
+      "index": 0,
+      "name": "full-history census",
+      "completedAt": "2026-08-31T00:00:00.000Z",
+      "fingerprint": "10469-552ee3c839a300a4",
+      "rows": {
+        "inExport": 20097,
+        "attested": 10469,
+        "omitted": 9628,
+        "omittedReason": "SKIP_ABSENT=1. Every omitted row is EvidenceAbsent, a bijection with the registry predicate feedbackURI == '' && feedbackHash != 0 (9,628 of 9,628 in both directions), so a reader reproduces the whole set from the registry with no attester input. They would have cost 125.84 CELO, 50.25% of the full backfill. The coverage claim's `attested` counts only what was written, so the omission is stated rather than hidden."
+      },
+      "sweep": {
+        "fromBlock": 58396729,
+        "toBlock": 76199590,
+        "observed": 27520,
+        "attested": 10469,
+        "recordsRoot": "0x497f7b3a06a5a5175d803f4a356b9fd445586507de44ce670459ad7d19dfce12",
+        "txHash": "0xff627c82a7d1ac793b7fed198966634cebd6ebd5d6189acc5baf4bb35e02ad00",
+        "block": 76262891,
+        "gasUsed": 148386
+      },
+      "cost": {
+        "transactions": 106,
+        "batches": 105,
+        "batchSize": 100,
+        "gasUsed": 629314830,
+        "gasPriceWei": "202500000000",
+        "costCelo": "127.43625316579130713",
+        "attesterBalanceAfter": "126.297897688667668285",
+        "estimated": {
+          "gas": 616677291,
+          "costCelo": "124.877151427500000000",
+          "note": "Over by 12,637,539 gas (+2.05%, 2.56 CELO), and the two errors ran in opposite directions. 24,634,748 gas of the real total is transaction-level cost the in-process harness does not charge at all: 21,000 x 106 plus 22,408,748 for 3.9 MiB of calldata. Net of that, real execution was 604,680,082, so the harness OVERSTATED execution by 11,997,209 (2.0%). That second discrepancy is not decomposed here; the likely cause is that each batch was simulated against a fresh contract, pricing the shared counter slots as first writes every time."
+        }
+      },
+      "interruption": {
+        "atBatch": 20,
+        "rowsWritten": 1900,
+        "error": "nonce too low: next nonce 229, tx nonce 228",
+        "cause": "forno serves one address from several nodes and eth_getTransactionCount is not monotonic across them; viem re-reads it before every send when no nonce is given, and a node that had not yet seen the transaction just mined returned a number one behind.",
+        "resolution": "The loop now reads the nonce once and counts from there (script/attest-backfill.mjs), with classified retries in script/rpc-retry.mjs. The run resumed from the marker at row 1900 and completed. No row was written twice: every sampled record reads revision 1, including rows 1899, 1900 and 1901 either side of the seam.",
+        "doubleWrites": 0
+      },
+      "verification": {
+        "method": "Read back from chain and compared with the published export, not with the script that wrote it.",
+        "totalAttestations": 10469,
+        "sweepCount": 1,
+        "coverage": [
+          58396729,
+          76199590,
+          1
+        ],
+        "sweepMatchesIndexerManifest": true,
+        "isWithinSweepAtMidpoint": true,
+        "isWithinSweepOutsideRange": false,
+        "sampledRecords": 24,
+        "sampledMismatches": 0,
+        "sampleDesign": "At least one first and last row of every verdict written, the batch boundaries at rows 0/99/100 and 9999, the resume seam at rows 1899/1900/1901, the first row carrying an amount, the first row citing a transaction, and three EvidenceAbsent rows asserted to read None with revision 0.",
+        "ownerUnchanged": true,
+        "attesterUnchanged": true,
+        "pendingOwner": "0x0000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "index": 1,
+      "name": "first incremental sweep",
+      "completedAt": "2026-08-31T12:00:00.000Z",
+      "fingerprint": "17-27d26ca5353c38ab",
+      "rows": {
+        "inExport": 17,
+        "attested": 17,
+        "omitted": 0,
+        "omittedReason": "None. This window held no EvidenceAbsent rows, so SKIP_ABSENT would have changed nothing and was not used."
+      },
+      "sweep": {
+        "fromBlock": 76199591,
+        "toBlock": 76273643,
+        "observed": 18,
+        "attested": 17,
+        "recordsRoot": "0xbec80576d6da613e516b32764306cfa139793b35857cccd3784e6c49676b8fa6",
+        "txHash": "0x30acb9e9342cdf1b4c02d312d65e6781f577e9dd25b933d0dc29d0b6240bc935",
+        "block": 76279497,
+        "gasUsed": 137392,
+        "contiguity": "fromBlock is exactly sweep #0's toBlock + 1, so commitSweep's CoverageGap check passes with no hole between the claims."
+      },
+      "cost": {
+        "transactions": 2,
+        "batches": 1,
+        "batchSize": 100,
+        "gasUsed": 1728235,
+        "gasPriceWei": "202500000000",
+        "costCelo": "0.3499675875",
+        "attesterBalanceAfter": "125.947930101167668285",
+        "estimated": {
+          "costCelo": "0.241514865",
+          "note": "Over by 45%, and the error was mine and avoidable. The estimate used 60,098 gas per row, the blended average of the first backfill, which was dominated by EvidenceIntact rows carrying no payment fields. All 17 rows here are PaymentTxNotFound and each stores a non-zero 32-byte paymentTx, costing 93,579 gas per row measured \u2014 1.56x the blend. Having warned against extrapolating from the cheapest rows during the first backfill, I then applied a blended average to a batch made entirely of the expensive kind."
+        }
+      },
+      "verification": {
+        "method": "Read back from chain and compared with the indexer manifest.",
+        "totalAttestations": 10486,
+        "sweepCount": 2,
+        "coverage": [
+          58396729,
+          76273643,
+          2
+        ],
+        "sweepMatchesIndexerManifest": true,
+        "isWithinSweepAtSeam": "true at 76199590 and at 76199591, false at 76273644 and at 58396728",
+        "v5FixExercised": {
+          "note": "First real exercise of the v5 retraction fix, which lives entirely in the multi-sweep path and could not be reached with one sweep. v4 had no prev* fields and tracked the newest standing claim with a count used as an index.",
+          "sweep1PrevCoveredFrom": 58396729,
+          "sweep1PrevCoveredTo": 76199590,
+          "sweep1PrevLatest": 0,
+          "sweep0PrevFrontier": [
+            0,
+            0
+          ],
+          "meaning": "Sweep #1 records the exact frontier a retraction would restore, and the array index of the claim it supersedes. Read back from chain."
+        },
+        "consumerView": "script/read-ledger.mjs --agent 9734: the five records that read 'uncovered' before this sweep now read 'attested'; 37 of 37 attested, 0 silent, 0 uncovered."
+      },
+      "finding": {
+        "summary": "All 17 records declare a payment on Celo naming a transaction that is not on Celo, while every one of their evidence files was retrieved and every hash matched the registry.",
+        "crossChecked": "forno, Blockscout and Ankr, each answering a control lookup correctly first.",
+        "reviewer": "0x103040545AC5031A11E8C03dd11324C7333a13C7",
+        "context": "The same address accounts for all 76 PaymentTxNotFound records in the 20,097-row census, plus its 17 PaymentPartyMismatch \u2014 93 of 93 \u2014 and now 17 more.",
+        "limits": "The verdict states what was observed and asserts nothing about intent. A client that writes the hash before broadcasting, or misreports which chain it settled on, produces the same trace."
+      }
     }
-  },
-  "interruption": {
-    "atBatch": 20,
-    "rowsWritten": 1900,
-    "error": "nonce too low: next nonce 229, tx nonce 228",
-    "cause": "forno serves one address from several nodes and eth_getTransactionCount is not monotonic across them; viem re-reads it before every send when no nonce is given, and a node that had not yet seen the transaction just mined returned a number one behind.",
-    "resolution": "The loop now reads the nonce once and counts from there (script/attest-backfill.mjs), with classified retries in script/rpc-retry.mjs. The run resumed from the marker at row 1900 and completed. No row was written twice: every sampled record reads revision 1, including rows 1899, 1900 and 1901 either side of the seam.",
-    "doubleWrites": 0
-  },
-  "verification": {
-    "method": "Read back from chain and compared with the published export, not with the script that wrote it.",
-    "totalAttestations": 10469,
-    "sweepCount": 1,
-    "coverage": [58396729, 76199590, 1],
-    "sweepMatchesIndexerManifest": true,
-    "isWithinSweepAtMidpoint": true,
-    "isWithinSweepOutsideRange": false,
-    "sampledRecords": 24,
-    "sampledMismatches": 0,
-    "sampleDesign": "At least one first and last row of every verdict written, the batch boundaries at rows 0/99/100 and 9999, the resume seam at rows 1899/1900/1901, the first row carrying an amount, the first row citing a transaction, and three EvidenceAbsent rows asserted to read None with revision 0.",
-    "ownerUnchanged": true,
-    "attesterUnchanged": true,
-    "pendingOwner": "0x0000000000000000000000000000000000000000"
-  },
+  ],
   "sourceVerification": {
     "explorer": "https://celo.blockscout.com/address/0x86931Ae74F5cE9AA8bf818808e47102516CE78a7?tab=contract",
     "isFullyVerified": true,
     "isPartiallyVerified": false,
     "compiler": "v0.8.28+commit.7893614a",
-    "optimizer": { "enabled": true, "runs": 10000 },
+    "optimizer": {
+      "enabled": true,
+      "runs": 10000
+    },
     "evmVersion": "paris",
     "publishedSourceIdenticalToRepo": true,
-    "note": "The explorer reported 'Already verified', which by itself says nothing about which build is published. Checked instead by fetching the published source and comparing it with contracts/ProvenanceAttestations.sol: identical, 52,444 bytes, VERSION 5.0.0, and carrying _latestLive and prevLatest — the fields the v5 retraction fix introduced."
+    "note": "The explorer reported 'Already verified', which by itself says nothing about which build is published. Checked instead by fetching the published source and comparing it with contracts/ProvenanceAttestations.sol: identical, 52,444 bytes, VERSION 5.0.0, and carrying _latestLive and prevLatest \u2014 the fields the v5 retraction fix introduced."
   }
 }

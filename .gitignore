@@ -2,5 +2,5 @@ node_modules/
 out/
 .env
 *.log
-deployments/backfill-progress.json
+deployments/backfill-progress*.json
 backfill.log
