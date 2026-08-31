@@ -21,7 +21,7 @@
 import { createPublicClient, http, parseAbiItem, formatUnits } from 'viem'
 import { celo } from 'viem/chains'
 import { readFileSync, existsSync, readdirSync } from 'node:fs'
-import { readLedger, summarise, STANDING } from './ledger.mjs'
+import { readLedger, summarise } from '../packages/ledger/index.mjs'
 import { parseCsvStrict } from './csv.mjs'
 
 const RPC = process.env.CELO_RPC_URL ?? 'https://forno.celo.org'

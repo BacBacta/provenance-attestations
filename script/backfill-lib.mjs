@@ -23,58 +23,17 @@ export function parseClaimsCsvStrict(text) {
   return parseCsvStrict(text)
 }
 
-/** Mirrors the on-chain enum exactly. Names are the contract's, not ours. */
 /**
- * Verdicts and payment states under which a cited transaction CREDITS the row.
- *
- * Everything else that names a transaction is making a statement about the
- * citation rather than being vouched for by it.
+ * The contract's enums live in packages/ledger/enums.mjs and are re-exported
+ * here. They were defined in this file until the reader became a package: two
+ * tables that must agree and are maintained apart are two tables that will
+ * eventually disagree, and the place that would show it is a verdict written
+ * under the wrong name.
  */
-export const Verdict = {
-  None: 0,
-  PaymentVerified: 1,
-  EvidenceIntact: 2,
-  EvidenceUnbound: 3,
-  EvidenceUnhashed: 4,
-  PaymentTxNotFound: 5,
-  PaymentTxFailed: 6,
-  PaymentNoValue: 7,
-  EvidenceUnreachable: 8,
-  EvidenceAbsent: 9,
-  PaymentAttributed: 10,
-  PaymentPartyMismatch: 11,
-  PaymentForeignChain: 12,
-  EvidenceInconclusive: 13,
-}
-
-/** The documentary dimension, recorded alongside the headline verdict. */
-export const Evidence = {
-  Unknown: 0,
-  Intact: 1,
-  Unbound: 2,
-  Unhashed: 3,
-  Unreachable: 4,
-  Inconclusive: 5,
-  Absent: 6,
-}
-
-/**
- * The payment dimension. `Unknown` is not "no payment" — it means this pass had
- * nothing to say, and the contract preserves whatever it already knew. A
- * settled transfer must not be erased by a later pass that could no longer read
- * the file naming it.
- */
-export const Payment = {
-  Unknown: 0,
-  Attributed: 1,
-  Verified: 2,
-  PartyMismatch: 3,
-  NoValue: 4,
-  Failed: 5,
-  NotFound: 6,
-  ForeignChain: 7,
-  NotDeclared: 8,
-}
+export {
+  Verdict, Evidence, Payment, VERDICT_NAMES, EVIDENCE_NAMES, PAYMENT_NAMES,
+} from '../packages/ledger/enums.mjs'
+import { Verdict, Evidence, Payment, VERDICT_NAMES } from '../packages/ledger/enums.mjs'
 
 /**
  * Verdicts and payment states under which a cited transaction CREDITS the row.
@@ -86,7 +45,6 @@ export const Payment = {
 const CREDITS_PAYMENT = new Set([Verdict.PaymentVerified, Verdict.PaymentAttributed])
 const CREDITS_PAYMENT_DIM = new Set([Payment.Verified, Payment.Attributed])
 
-export const VERDICT_NAMES = Object.fromEntries(Object.entries(Verdict).map(([k, v]) => [v, k]))
 
 /** Rungs that assert the transaction was found, so must carry its hash. */
 const ASSERTS_TX_EXISTS = new Set([

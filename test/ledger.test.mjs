@@ -12,8 +12,8 @@
 import assert from 'node:assert/strict'
 import {
   standingOf, derivableFromRegistry, summarise, STANDING, EVIDENCE_NAMES, PAYMENT_NAMES,
-} from '../script/ledger.mjs'
-import { Verdict, Evidence, Payment } from '../script/backfill-lib.mjs'
+} from '../packages/ledger/index.mjs'
+import { Verdict, Evidence, Payment } from '../packages/ledger/enums.mjs'
 
 let passed = 0
 function check(name, fn) {

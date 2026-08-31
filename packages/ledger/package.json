@@ -1,0 +1,24 @@
+{
+  "name": "provenance-ledger",
+  "version": "1.0.0",
+  "description": "Read ERC-8004 reputation attestations from the Provenance ledger on Celo, including the difference between a record the attester examined and said nothing about and one it never claimed to look at.",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./enums": "./enums.mjs",
+    "./deployment": "./deployment.mjs"
+  },
+  "files": ["index.mjs", "ledger.mjs", "enums.mjs", "deployment.mjs", "abi.json", "README.md"],
+  "keywords": ["erc-8004", "erc8004", "celo", "agent", "reputation", "attestation", "x402", "provenance"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BacBacta/provenance-attestations.git",
+    "directory": "packages/ledger"
+  },
+  "homepage": "https://github.com/BacBacta/provenance-attestations#read-it-back",
+  "peerDependencies": { "viem": "^2.0.0" },
+  "engines": { "node": ">=18" },
+  "sideEffects": false
+}

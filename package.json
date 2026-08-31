@@ -4,7 +4,7 @@
   "description": "On-chain verification verdicts for ERC-8004 reputation feedback on Celo. The validity layer the registry left out.",
   "scripts": {
     "compile": "node script/compile.mjs",
-    "test": "node script/compile.mjs && node test/contract.test.mjs && node test/backfill.test.mjs && node test/key.test.mjs && node test/rpc-retry.test.mjs && node test/ledger.test.mjs && node test/integration.test.mjs",
+    "test": "node script/compile.mjs && node test/contract.test.mjs && node test/backfill.test.mjs && node test/key.test.mjs && node test/rpc-retry.test.mjs && node test/ledger.test.mjs && node test/package.test.mjs && node test/integration.test.mjs",
     "deploy": "node script/compile.mjs && node script/deploy.mjs",
     "backfill": "node script/compile.mjs && node script/attest-backfill.mjs",
     "verify": "node script/compile.mjs && node script/verify.mjs",

@@ -1,0 +1,769 @@
+[
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "agentId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "clientAddress",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "enum ProvenanceAttestations.Verdict",
+        "name": "verdict",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "feedbackIndex",
+        "type": "uint64"
+      },
+      {
+        "indexed": false,
+        "internalType": "enum ProvenanceAttestations.Evidence",
+        "name": "evidence",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "enum ProvenanceAttestations.Payment",
+        "name": "payment",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "enum ProvenanceAttestations.Evidence",
+        "name": "statedEvidence",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "enum ProvenanceAttestations.Payment",
+        "name": "statedPayment",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes32",
+        "name": "paymentTx",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes32",
+        "name": "evidenceHash",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "paymentToken",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "evidenceObservedAt",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint32",
+        "name": "revision",
+        "type": "uint32"
+      }
+    ],
+    "name": "FeedbackAttested",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "agentId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "clientAddress",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "enum ProvenanceAttestations.Payment",
+        "name": "payment",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "feedbackIndex",
+        "type": "uint64"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes32",
+        "name": "paymentTx",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "paymentToken",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint8",
+        "name": "amountDecimals",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "observedAt",
+        "type": "uint40"
+      }
+    ],
+    "name": "PaymentAttested",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "fromBlock",
+        "type": "uint64"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "toBlock",
+        "type": "uint64"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint32",
+        "name": "observed",
+        "type": "uint32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint32",
+        "name": "attested",
+        "type": "uint32"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes32",
+        "name": "recordsRoot",
+        "type": "bytes32"
+      }
+    ],
+    "name": "SweepCommitted",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "fromBlock",
+        "type": "uint64"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "toBlock",
+        "type": "uint64"
+      }
+    ],
+    "name": "SweepRetracted",
+    "type": "event"
+  },
+  {
+    "inputs": [],
+    "name": "VERSION",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "",
+        "type": "string"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "attester",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "coverage",
+    "outputs": [
+      {
+        "internalType": "uint64",
+        "name": "from",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "to",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint256",
+        "name": "liveClaims",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "agentId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "clientAddress",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "feedbackIndex",
+        "type": "uint64"
+      }
+    ],
+    "name": "evidenceOf",
+    "outputs": [
+      {
+        "internalType": "enum ProvenanceAttestations.Evidence",
+        "name": "",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "agentId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "clientAddress",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "feedbackIndex",
+        "type": "uint64"
+      }
+    ],
+    "name": "getAttestation",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "enum ProvenanceAttestations.Verdict",
+            "name": "verdict",
+            "type": "uint8"
+          },
+          {
+            "internalType": "enum ProvenanceAttestations.Evidence",
+            "name": "evidence",
+            "type": "uint8"
+          },
+          {
+            "internalType": "enum ProvenanceAttestations.Payment",
+            "name": "payment",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint32",
+            "name": "revision",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "amountDecimals",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint40",
+            "name": "checkedAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "evidenceObservedAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "paymentObservedAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "paymentTx",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "evidenceHash",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint96",
+            "name": "amount",
+            "type": "uint96"
+          },
+          {
+            "internalType": "address",
+            "name": "paymentToken",
+            "type": "address"
+          }
+        ],
+        "internalType": "struct ProvenanceAttestations.Attestation",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "agentId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "clientAddress",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "feedbackIndex",
+        "type": "uint64"
+      }
+    ],
+    "name": "hasIntactEvidence",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "agentId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "clientAddress",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "feedbackIndex",
+        "type": "uint64"
+      }
+    ],
+    "name": "isPaymentAttributed",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "agentId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "clientAddress",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "feedbackIndex",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint96",
+        "name": "minAmount",
+        "type": "uint96"
+      },
+      {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      }
+    ],
+    "name": "isPaymentAttributedAtLeast",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "agentId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "clientAddress",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "feedbackIndex",
+        "type": "uint64"
+      }
+    ],
+    "name": "isPaymentBacked",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint64",
+        "name": "blockNumber",
+        "type": "uint64"
+      }
+    ],
+    "name": "isWithinSweep",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "agentId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "clientAddress",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "feedbackIndex",
+        "type": "uint64"
+      }
+    ],
+    "name": "key",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "latestSweep",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint64",
+            "name": "fromBlock",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "toBlock",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint32",
+            "name": "observed",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint32",
+            "name": "attested",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint40",
+            "name": "committedAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "bool",
+            "name": "retracted",
+            "type": "bool"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "recordsRoot",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint64",
+            "name": "prevCoveredFrom",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "prevCoveredTo",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "prevLatest",
+            "type": "uint64"
+          }
+        ],
+        "internalType": "struct ProvenanceAttestations.Sweep",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "owner",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "agentId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "clientAddress",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "feedbackIndex",
+        "type": "uint64"
+      }
+    ],
+    "name": "paymentOf",
+    "outputs": [
+      {
+        "internalType": "enum ProvenanceAttestations.Payment",
+        "name": "",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      }
+    ],
+    "name": "sweepAt",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint64",
+            "name": "fromBlock",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "toBlock",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint32",
+            "name": "observed",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint32",
+            "name": "attested",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint40",
+            "name": "committedAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "bool",
+            "name": "retracted",
+            "type": "bool"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "recordsRoot",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint64",
+            "name": "prevCoveredFrom",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "prevCoveredTo",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "prevLatest",
+            "type": "uint64"
+          }
+        ],
+        "internalType": "struct ProvenanceAttestations.Sweep",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "sweepCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "totalAttestations",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

@@ -494,7 +494,28 @@ reads both as "not checked yet" is misled in the other. Making that difference
 answerable is the entire reason `commitSweep` exists, and nothing in the
 per-record read surface makes it hard to ignore.
 
-`script/ledger.mjs` does. It resolves a three-way standing — `attested`,
+It is published as **[`provenance-ledger`](packages/ledger)**, so a consumer
+installs it rather than copying it:
+
+```
+npm install provenance-ledger viem
+```
+
+```js
+import { readLedger, summarise, contract } from 'provenance-ledger'
+const rows = await readLedger(client, contract, records)
+// standing: 'attested' | 'silent' | 'uncovered'
+```
+
+The package pins the deployed address and ships a read-only ABI — no write
+selector, so it cannot be mistaken for a way to attest. Tests assert both
+against the compiled contract, and the enums against the contract source
+rung by rung, because a package that pins an ABI and an address is a package a
+repository can silently move underneath. This project has already been caught by
+exactly that: its own ERC-8004 registration went on naming a superseded contract
+while resolving perfectly.
+
+`packages/ledger/ledger.mjs` resolves a three-way standing — `attested`,
 `silent`, `uncovered` — and names a third case that is the easiest of all to
 misread: silence the registry event itself explains. The first backfill left out
 9,628 records whose rung is decided by `feedbackURI == "" && feedbackHash != 0`,
