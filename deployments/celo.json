@@ -9,5 +9,11 @@
   "txHash": "0xdbfe5dbe52bb442a5bde9d1060aaa560ecb47a3347befb201915245e90b6c7cc",
   "block": "76234488",
   "chainId": 42220,
-  "deployedAt": "2026-08-31T00:14:08.994Z"
+  "deployedAt": "2026-08-31T00:14:08.994Z",
+  "gasUsed": "2988830",
+  "gasPriceWei": "202500000000",
+  "costCelo": "0.605238075",
+  "bytecodeMatchesBuild": true,
+  "note": "Every field read back from chain state and cross-checked: VERSION 5.0.0, pendingOwner zero, totalAttestations and sweepCount both zero, and the deployed bytecode identical to out/ProvenanceAttestations.deployed.bin byte for byte, metadata tail included. Owner is a cold key whose only power is rotating the attester; the attester signs verdicts and holds nothing else. Supersedes v4, whose coverage frontier could be withdrawn exactly once and afterwards reported blocks no standing claim covered while denying blocks a standing claim did; v4 was never written to.",
+  "supersedes": "0x050394eF9941D30f4a2D5989Ddc158e717798e17"
 }

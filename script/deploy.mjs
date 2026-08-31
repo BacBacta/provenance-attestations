@@ -375,6 +375,40 @@ const readOrNull = (fn) =>
 const onChainOwner = (await readOrNull('owner')) ?? account.address
 const onChainAttester = (await readOrNull('attester')) ?? attester
 
+/**
+ * What it cost, and whether the code on chain is the code in this repository.
+ *
+ * The record used to carry neither. Both were filled in by hand afterwards on
+ * the v4 deployment, and then not at all on the next one — which is what a
+ * step that depends on someone remembering always does. The price paid is how
+ * a later reader knows what gas price the project actually pays (an earlier
+ * cost estimate in the README was 8x low precisely because it guessed one),
+ * and the bytecode comparison is the single check that makes the address
+ * verifiable from this repository at all.
+ *
+ * `supersedes` is read from the record about to be overwritten, so the chain of
+ * deployments stays walkable from any one of them.
+ */
+const supersedes = existsSync('deployments/celo.json')
+  ? (() => { try { return JSON.parse(readFileSync('deployments/celo.json', 'utf8')).address ?? null } catch { return null } })()
+  : null
+
+const gasUsed = receipt ? receipt.gasUsed : null
+const paidGasPrice = receipt?.effectiveGasPrice ?? null
+const costCelo = gasUsed && paidGasPrice ? formatEther(gasUsed * paidGasPrice) : null
+
+let bytecodeMatches = null
+try {
+  const onChain = (await pub.getBytecode({ address: expected }))?.toLowerCase() ?? ''
+  const built = ('0x' + readFileSync('out/ProvenanceAttestations.deployed.bin', 'utf8').trim()).toLowerCase()
+  bytecodeMatches = onChain === built
+} catch { /* recorded as null: unknown is not the same as false */ }
+
+if (bytecodeMatches === false) {
+  console.error('\n  ! The deployed bytecode does NOT match out/ProvenanceAttestations.deployed.bin.')
+  console.error('    Source verification will fail. The record says so rather than hiding it.')
+}
+
 const record = {
   contract: 'ProvenanceAttestations',
   version,
@@ -393,6 +427,16 @@ const record = {
   block: receipt ? receipt.blockNumber.toString() : null,
   chainId: celo.id,
   deployedAt: new Date().toISOString(),
+  ...(gasUsed ? { gasUsed: gasUsed.toString() } : {}),
+  ...(paidGasPrice ? { gasPriceWei: paidGasPrice.toString() } : {}),
+  ...(costCelo ? { costCelo } : {}),
+  /**
+   * Whether the code on chain is byte-for-byte the code this repository built,
+   * metadata tail included. `null` means the comparison could not be made —
+   * which is not the same as a mismatch, and is recorded as its own answer.
+   */
+  bytecodeMatchesBuild: bytecodeMatches,
+  ...(supersedes && supersedes !== expected ? { supersedes } : {}),
   ...(versionNote ? { versionNote } : {}),
 }
 writeFileSync('deployments/celo.json', JSON.stringify(record, null, 2))
