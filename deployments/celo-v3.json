@@ -1,0 +1,14 @@
+{
+  "contract": "ProvenanceAttestations",
+  "version": "3.0.0",
+  "address": "0xAD6202F635e97f17f193524CCa66B5D288ab6807",
+  "deployer": "0x6141C7377dfEF6ac8FD2156f5D9fbFb4851Ac4ef",
+  "owner": "0x6141C7377dfEF6ac8FD2156f5D9fbFb4851Ac4ef",
+  "attester": "0xC2Dc6B2853a8deAE5C0A6432B77F226d67B2972A",
+  "txHash": "0xce3e4de403cba1f49e28cdb725923762857c5fc56d37fd81c72b14aa7451b95a",
+  "block": "76082999",
+  "chainId": 42220,
+  "deployedAt": "2026-08-29T06:09:17.000Z",
+  "note": "Owner and attester are separate keys. The owner is a cold key whose only power is rotating the attester; the attester signs verdicts and holds nothing else. Fields read back from chain state: the deploy script recorded version as null because its VERSION() read failed transiently just after deployment.",
+  "supersedes": "0x3ed53c9bf7f7b5026eae83e4d62abdbd748a01ab"
+}

@@ -251,28 +251,6 @@ contract ProvenanceAttestations {
         ///      bytes32(0) means the attester published counts without a root,
         ///      which is a weaker claim and readable as such.
         bytes32 recordsRoot;
-        /**
-         * The frontier as it stood immediately BEFORE this claim was committed.
-         *
-         * Retraction has to put coverage back exactly where it was, and the
-         * only place that answer certainly exists is here, written down when it
-         * was still true. v4 recomputed it as `_sweeps[_liveSweeps - 1].toBlock`
-         * — an array indexed by POSITION, read with a count of LIVE claims. The
-         * two are equal only until the first retraction, because a retraction
-         * marks its entry and never removes it. So the roll-back read the wrong
-         * sweep, and the guard beside it compared a position against a count and
-         * rejected every subsequent retraction: after one use, no index was
-         * retractable at all. On a contract whose coverage can only ever move
-         * forward, that made every published range permanently irrevocable.
-         *
-         * One extra slot per commit — an operation that happens once per audit
-         * pass — buys an O(1) roll-back that cannot drift.
-         */
-        uint64 prevCoveredFrom;
-        uint64 prevCoveredTo;
-        /// @dev Array index of the newest standing claim before this one. Read
-        ///      only when a claim before this one was standing.
-        uint64 prevLatest;
     }
 
     // ---------------------------------------------------------------- state
@@ -324,18 +302,9 @@ contract ProvenanceAttestations {
     uint64 private _coveredFrom;
     uint64 private _coveredTo;
     uint256 private _liveSweeps;
-    /**
-     * Array index of the newest claim still standing.
-     *
-     * Meaningful only while `_liveSweeps != 0`. The distinction this variable
-     * exists to keep is between WHERE a claim sits in the append-only array and
-     * HOW MANY claims are standing — v4 used the second where it meant the
-     * first, and the two diverge permanently at the first retraction.
-     */
-    uint64 private _latestLive;
 
     /// @notice Contract revision, for consumers that read across deployments.
-    string public constant VERSION = "5.0.0";
+    string public constant VERSION = "4.0.0";
 
     // ---------------------------------------------------------------- events
 
@@ -648,21 +617,6 @@ contract ProvenanceAttestations {
          */
         if (c.evidence == Evidence.Intact && c.evidenceHash == bytes32(0)) revert MissingEvidenceHash();
         if (c.verdict == Verdict.EvidenceIntact && c.evidenceHash == bytes32(0)) revert MissingEvidenceHash();
-        /**
-         * The same argument, for the rung that accuses rather than confirms.
-         *
-         * `Unhashed` means the file resolved and CONTRADICTS its attested hash.
-         * With no hash stored there is nothing it can have contradicted — that
-         * state is `Unbound`, defined four lines from it. v4 guarded only
-         * `Intact`, so the ledger accepted "this document contradicts the hash
-         * the registry attested" while storing a zero in the field naming that
-         * hash. The record is then byte-identical in its hash field to
-         * `Unbound`, the benign rung meaning no hash was ever attested — and
-         * the accusation cannot be checked by anyone, because the thing it
-         * says was contradicted is not written down.
-         */
-        if (c.evidence == Evidence.Unhashed && c.evidenceHash == bytes32(0)) revert MissingEvidenceHash();
-        if (c.verdict == Verdict.EvidenceUnhashed && c.evidenceHash == bytes32(0)) revert MissingEvidenceHash();
 
         /**
          * A dimension that is stated must say when it was looked at.
@@ -689,26 +643,11 @@ contract ProvenanceAttestations {
          * the transaction was never found, cannot carry a settled amount: a
          * consumer reading `amount` beside `PaymentNoValue` is being told two
          * incompatible things by one record.
-         *
-         * In v4 this was the ONLY payload guard that read `c.verdict` alone.
-         * Its three siblings — the attribution guard, `_assertsTxExists` and
-         * the evidence-hash guard — are each written over both dimensions, and
-         * the two-dimension model exists precisely so the payment dimension can
-         * travel under a documentary headline. So `evidence: Intact` with
-         * `payment: NoValue`, `amount: 1000000` and no transaction hash passed
-         * validation and was stored: a record answering "the transaction moved
-         * nothing" beside a settled sum of one million. Measured on v4:
-         * `NoValue` and `ForeignChain` both accepted it. (`NotFound` did not,
-         * but only because MissingPaymentTx catches it first, which is luck
-         * rather than this guard doing its job.)
          */
         if (c.amount != 0 && (
             c.verdict == Verdict.PaymentNoValue ||
             c.verdict == Verdict.PaymentTxNotFound ||
-            c.verdict == Verdict.PaymentForeignChain ||
-            c.payment == Payment.NoValue ||
-            c.payment == Payment.NotFound ||
-            c.payment == Payment.ForeignChain
+            c.verdict == Verdict.PaymentForeignChain
         )) revert IncoherentAmount();
         /**
          * `NotDeclared` is the claim that the document names no payment. It
@@ -802,11 +741,6 @@ contract ProvenanceAttestations {
          * further"; making it silently would move the floor of every answer
          * this contract has already given.
          */
-        // Captured before the frontier moves: this is what retraction restores.
-        uint64 prevCoveredFrom = _coveredFrom;
-        uint64 prevCoveredTo = _coveredTo;
-        uint64 prevLatest = _latestLive;
-
         if (_liveSweeps != 0) {
             if (toBlock <= _coveredTo) revert InvalidRange();
             if (fromBlock > _coveredTo + 1) revert CoverageGap();
@@ -817,7 +751,6 @@ contract ProvenanceAttestations {
             _coveredTo = toBlock;
         }
         unchecked { _liveSweeps += 1; }
-        _latestLive = uint64(_sweeps.length);
 
         /**
          * A coverage claim cannot exceed what this contract has actually
@@ -834,10 +767,7 @@ contract ProvenanceAttestations {
             attested: attested,
             committedAt: uint40(block.timestamp),
             retracted: false,
-            recordsRoot: recordsRoot,
-            prevCoveredFrom: prevCoveredFrom,
-            prevCoveredTo: prevCoveredTo,
-            prevLatest: prevLatest
+            recordsRoot: recordsRoot
         }));
 
         emit SweepCommitted(_sweeps.length - 1, fromBlock, toBlock, observed, attested, recordsRoot);
@@ -859,18 +789,12 @@ contract ProvenanceAttestations {
          * Withdraw them in order, newest first, and each withdrawal rolls the
          * frontier back to where the claim before it left off.
          */
-        if (_liveSweeps == 0) revert NoSuchSweep();
-        // By POSITION in the array, never by a count of standing claims.
-        if (index != _latestLive) revert NotLatestSweep();
-
-        Sweep storage s = _sweeps[index];
-        s.retracted = true;
+        if (index != _liveSweeps - 1) revert NotLatestSweep();
+        _sweeps[index].retracted = true;
         unchecked { _liveSweeps -= 1; }
-        // Restored from what was written down, not recomputed from a count.
-        _coveredFrom = s.prevCoveredFrom;
-        _coveredTo = s.prevCoveredTo;
-        _latestLive = s.prevLatest;
-        emit SweepRetracted(index, s.fromBlock, s.toBlock);
+        _coveredTo = _liveSweeps == 0 ? 0 : _sweeps[_liveSweeps - 1].toBlock;
+        if (_liveSweeps == 0) _coveredFrom = 0;
+        emit SweepRetracted(index, _sweeps[index].fromBlock, _sweeps[index].toBlock);
     }
 
     // ----------------------------------------------------------------- read

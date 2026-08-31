@@ -5,25 +5,83 @@
  *
  * Every test deploys fresh state. Assertions target behaviour a consumer or an
  * adversary would care about: who may write, what overwriting means, what the
- * events carry, and that the "absence" value can never be forged.
+ * events carry, that the "absence" value can never be forged, and that a rung
+ * cannot be published alongside a payload that refutes it.
  */
 import assert from 'node:assert/strict'
 import { encodeAbiParameters } from 'viem'
-import { newChain, ERRORS } from './harness.mjs'
+import { newChain, ERRORS, BLOCK_TIMESTAMP } from './harness.mjs'
 
 const OWNER    = '0x00000000000000000000000000000000000000a1'
 const ATTESTER = '0x00000000000000000000000000000000000000a2'
 const STRANGER = '0x00000000000000000000000000000000000000a3'
+const COLD     = '0x00000000000000000000000000000000000000a4'
 const REVIEWER = '0x00000000000000000000000000000000000000b1'
+const TOKEN    = '0x00000000000000000000000000000000000000c1'
 
 const TX1 = '0x' + '11'.repeat(32)
+const TX2 = '0x' + '99'.repeat(32)
 const EH1 = '0x' + '22'.repeat(32)
 const ZERO32 = '0x' + '00'.repeat(32)
+const ZERO_ADDR = '0x' + '00'.repeat(20)
 
 const V = {
   None: 0, PaymentVerified: 1, EvidenceIntact: 2, EvidenceUnbound: 3, EvidenceUnhashed: 4,
   PaymentTxNotFound: 5, PaymentTxFailed: 6, PaymentNoValue: 7,
   EvidenceUnreachable: 8, EvidenceAbsent: 9,
+  PaymentAttributed: 10, PaymentPartyMismatch: 11, PaymentForeignChain: 12,
+  EvidenceInconclusive: 13,
+}
+const E = { Unknown: 0, Intact: 1, Unbound: 2, Unhashed: 3, Unreachable: 4, Inconclusive: 5, Absent: 6 }
+const P = { Unknown: 0, Attributed: 1, Verified: 2, PartyMismatch: 3, NoValue: 4, Failed: 5, NotFound: 6, ForeignChain: 7, NotDeclared: 8 }
+
+/** A well-formed claim, so each test only states what it is actually varying. */
+function claim(over = {}) {
+  return {
+    agentId: 1n,
+    clientAddress: REVIEWER,
+    feedbackIndex: 0n,
+    verdict: V.EvidenceIntact,
+    evidence: E.Intact,
+    payment: P.Unknown,
+    paymentTx: ZERO32,
+    evidenceHash: EH1,
+    amount: 0n,
+    paymentToken: ZERO_ADDR,
+    amountDecimals: 0,
+    // A stated dimension must say when it was looked at, so the default claim
+    // carries a real observation date. Tests that care about the date override
+    // it; tests that do not would otherwise all fail on ObservationMissing.
+    observedAt: Number(BLOCK_TIMESTAMP - 86_400n),
+    ...over,
+  }
+}
+
+/** A settled, attributed payment — the only shape the strong rung accepts. */
+const attributed = (over = {}) => claim({
+  verdict: V.PaymentAttributed, payment: P.Attributed,
+  paymentTx: TX1, amount: 1_000_000n, paymentToken: TOKEN, amountDecimals: 6,
+  ...over,
+})
+
+/** Write `n` real attestations, so a coverage claim has writes to be bounded by. */
+async function attestMany(chain, addr, n) {
+  for (let i = 0; i < n; i++) {
+    await chain.call(ATTESTER, addr, 'attest', [claim({ agentId: BigInt(i), feedbackIndex: BigInt(i) })])
+  }
+}
+
+/**
+ * One event by name.
+ *
+ * `logs[0]` stopped being the record's own event once the payment dimension
+ * got a second, subscribable one — and a test that indexes blindly starts
+ * asserting about a different event than it means to.
+ */
+function only(logs, name) {
+  const found = logs.filter((l) => l.eventName === name)
+  assert.equal(found.length, 1, `expected exactly one ${name}, got ${found.length}`)
+  return found[0].args
 }
 
 async function fresh() {
@@ -45,7 +103,7 @@ await check('constructor sets owner and attester, and refuses a zero attester', 
   const { chain, addr } = await fresh()
   assert.equal((await chain.call(STRANGER, addr, 'owner', [])).result.toLowerCase(), OWNER)
   assert.equal((await chain.call(STRANGER, addr, 'attester', [])).result.toLowerCase(), ATTESTER)
-  const zeroCtor = encodeAbiParameters([{ type: 'address' }], ['0x' + '00'.repeat(20)])
+  const zeroCtor = encodeAbiParameters([{ type: 'address' }], [ZERO_ADDR])
   await assert.rejects(() => chain.deploy(OWNER, zeroCtor))
 })
 
@@ -53,219 +111,1305 @@ console.log('\nauthorization')
 
 await check('only the attester can attest — not the owner, not a stranger', async () => {
   const { chain, addr } = await fresh()
-  const args = [1n, REVIEWER, 0n, V.PaymentVerified, TX1, EH1]
   for (const who of [OWNER, STRANGER]) {
-    const r = await chain.call(who, addr, 'attest', args)
+    const r = await chain.call(who, addr, 'attest', [claim()])
     assert.equal(r.reverted, true)
     assert.equal(r.selector, ERRORS.NotAttester)
   }
-  assert.equal((await chain.call(ATTESTER, addr, 'attest', args)).reverted, false)
+  assert.equal((await chain.call(ATTESTER, addr, 'attest', [claim()])).reverted, false)
 })
 
 await check('only the owner rotates the attester, and never to the zero address', async () => {
   const { chain, addr } = await fresh()
-  let r = await chain.call(STRANGER, addr, 'setAttester', [STRANGER])
-  assert.equal(r.selector, ERRORS.NotOwner)
-  r = await chain.call(OWNER, addr, 'setAttester', ['0x' + '00'.repeat(20)])
-  assert.equal(r.selector, ERRORS.ZeroAddress)
-  r = await chain.call(OWNER, addr, 'setAttester', [STRANGER])
-  assert.equal(r.reverted, false)
+  assert.equal((await chain.call(STRANGER, addr, 'setAttester', [STRANGER])).selector, ERRORS.NotOwner)
+  assert.equal((await chain.call(OWNER, addr, 'setAttester', [ZERO_ADDR])).selector, ERRORS.ZeroAddress)
+  assert.equal((await chain.call(OWNER, addr, 'setAttester', [STRANGER])).reverted, false)
   // Old attester is locked out immediately; new one works.
-  const args = [1n, REVIEWER, 0n, V.PaymentTxNotFound, ZERO32, EH1]
-  assert.equal((await chain.call(ATTESTER, addr, 'attest', args)).selector, ERRORS.NotAttester)
-  assert.equal((await chain.call(STRANGER, addr, 'attest', args)).reverted, false)
+  assert.equal((await chain.call(ATTESTER, addr, 'attest', [claim()])).selector, ERRORS.NotAttester)
+  assert.equal((await chain.call(STRANGER, addr, 'attest', [claim()])).reverted, false)
 })
 
-await check('ownership transfers, and the zero address is refused', async () => {
+console.log('\nownership handover (two-step)')
+
+await check('a transfer does not take effect until the new owner accepts', async () => {
   const { chain, addr } = await fresh()
-  assert.equal((await chain.call(OWNER, addr, 'transferOwnership', ['0x' + '00'.repeat(20)])).selector, ERRORS.ZeroAddress)
-  assert.equal((await chain.call(OWNER, addr, 'transferOwnership', [STRANGER])).reverted, false)
-  assert.equal((await chain.call(OWNER, addr, 'setAttester', [OWNER])).selector, ERRORS.NotOwner)
-  assert.equal((await chain.call(STRANGER, addr, 'setAttester', [STRANGER])).reverted, false)
+  assert.equal((await chain.call(OWNER, addr, 'transferOwnership', [COLD])).reverted, false)
+  // Still the old owner until acceptance — this is the whole point.
+  assert.equal((await chain.call(STRANGER, addr, 'owner', [])).result.toLowerCase(), OWNER)
+  assert.equal((await chain.call(STRANGER, addr, 'pendingOwner', [])).result.toLowerCase(), COLD)
+  assert.equal((await chain.call(OWNER, addr, 'setAttester', [STRANGER])).reverted, false)
+})
+
+await check('only the owner-elect can accept, which is what proves the key exists', async () => {
+  const { chain, addr } = await fresh()
+  await chain.call(OWNER, addr, 'transferOwnership', [COLD])
+  assert.equal((await chain.call(STRANGER, addr, 'acceptOwnership', [])).selector, ERRORS.NotPendingOwner)
+  assert.equal((await chain.call(OWNER, addr, 'acceptOwnership', [])).selector, ERRORS.NotPendingOwner)
+  assert.equal((await chain.call(COLD, addr, 'acceptOwnership', [])).reverted, false)
+  assert.equal((await chain.call(STRANGER, addr, 'owner', [])).result.toLowerCase(), COLD)
+  assert.equal((await chain.call(STRANGER, addr, 'pendingOwner', [])).result.toLowerCase(), ZERO_ADDR)
+})
+
+await check('a transfer to an unreachable address is survivable, not fatal', async () => {
+  // The failure this two-step design exists to prevent: under a one-step
+  // transfer, a mistyped address permanently destroys attester rotation — the
+  // only defence the trust model has against a compromised attesting key.
+  const { chain, addr } = await fresh()
+  const TYPO = '0x000000000000000000000000000000000000dead'
+  await chain.call(OWNER, addr, 'transferOwnership', [TYPO])
+  assert.equal((await chain.call(STRANGER, addr, 'owner', [])).result.toLowerCase(), OWNER)
+  // The mistake is cancelled by the still-sitting owner.
+  await chain.call(OWNER, addr, 'transferOwnership', [ZERO_ADDR])
+  assert.equal((await chain.call(TYPO, addr, 'acceptOwnership', [])).selector, ERRORS.NotPendingOwner)
+  assert.equal((await chain.call(OWNER, addr, 'setAttester', [STRANGER])).reverted, false)
 })
 
 console.log('\nattestation semantics')
 
 await check('a verdict is stored and readable exactly as written', async () => {
   const { chain, addr } = await fresh()
-  await chain.call(ATTESTER, addr, 'attest', [7n, REVIEWER, 3n, V.PaymentVerified, TX1, EH1])
+  await chain.call(ATTESTER, addr, 'attest', [attributed({ agentId: 7n, feedbackIndex: 3n, observedAt: 1_700_000_000 })])
   const a = (await chain.call(STRANGER, addr, 'getAttestation', [7n, REVIEWER, 3n])).result
-  assert.equal(a.verdict, V.PaymentVerified)
+  assert.equal(a.verdict, V.PaymentAttributed)
+  assert.equal(a.payment, P.Attributed)
   assert.equal(a.paymentTx, TX1)
   assert.equal(a.evidenceHash, EH1)
+  assert.equal(a.amount, 1_000_000n)
+  assert.equal(a.paymentToken.toLowerCase(), TOKEN)
+  assert.equal(a.amountDecimals, 6)
+  assert.equal(a.paymentObservedAt, 1_700_000_000, 'the date lands on the dimension that was checked')
+  assert.equal(a.evidenceObservedAt, 1_700_000_000)
   assert.equal(a.revision, 1)
-  assert.equal(typeof a.checkedAt, 'number') // uint40 decodes as number; bare-EVM timestamp is 0
 })
 
 await check('None can never be written — absence stays unforgeable', async () => {
   const { chain, addr } = await fresh()
-  const r = await chain.call(ATTESTER, addr, 'attest', [1n, REVIEWER, 0n, V.None, ZERO32, ZERO32])
+  const r = await chain.call(ATTESTER, addr, 'attest', [claim({ verdict: V.None })])
   assert.equal(r.selector, ERRORS.InvalidVerdict)
 })
 
-await check('an unattested record reads as None and is not payment-backed', async () => {
+await check('an unattested record reads as None and grants nothing', async () => {
   const { chain, addr } = await fresh()
   const a = (await chain.call(STRANGER, addr, 'getAttestation', [99n, REVIEWER, 0n])).result
   assert.equal(a.verdict, V.None)
   assert.equal(a.revision, 0)
   assert.equal((await chain.call(STRANGER, addr, 'isPaymentBacked', [99n, REVIEWER, 0n])).result, false)
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributed', [99n, REVIEWER, 0n])).result, false)
+  assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [99n, REVIEWER, 0n])).result, false)
 })
 
-await check('re-attestation overwrites the verdict and bumps the revision', async () => {
+await check('re-attesting overwrites and bumps the revision', async () => {
   const { chain, addr } = await fresh()
-  await chain.call(ATTESTER, addr, 'attest', [1n, REVIEWER, 0n, V.PaymentTxNotFound, ZERO32, EH1])
-  // The claimed tx later appears on chain: verdict flips.
-  await chain.call(ATTESTER, addr, 'attest', [1n, REVIEWER, 0n, V.PaymentVerified, TX1, EH1])
+  await chain.call(ATTESTER, addr, 'attest', [claim({ verdict: V.EvidenceIntact, evidence: E.Intact })])
+  await chain.call(ATTESTER, addr, 'attest', [claim({ verdict: V.EvidenceUnreachable, evidence: E.Unreachable })])
   const a = (await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result
-  assert.equal(a.verdict, V.PaymentVerified)
+  assert.equal(a.verdict, V.EvidenceUnreachable)
+  assert.equal(a.evidence, E.Unreachable)
   assert.equal(a.revision, 2)
+})
+
+console.log('\nthe two dimensions')
+
+await check('a payment verdict no longer erases what the file was', async () => {
+  // v2 had one slot: the payment rung outranked every documentary rung, so for
+  // every record declaring a payment the state of its file was measured and
+  // then discarded.
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [attributed({ evidence: E.Intact })])
+  const a = (await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result
+  assert.equal(a.verdict, V.PaymentAttributed)
+  assert.equal(a.evidence, E.Intact)
+  assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [1n, REVIEWER, 0n])).result, true)
+})
+
+await check('a settled payment survives its evidence file dying later', async () => {
+  // The monotonicity bug: a settled transfer is immutable, but under one slot a
+  // later pass that could no longer read the file flipped isPaymentBacked to
+  // false about a transaction that had not changed.
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [attributed()])
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributed', [1n, REVIEWER, 0n])).result, true)
+
+  // Months later the file 404s. The pass has nothing to say about the payment.
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceUnreachable, evidence: E.Unreachable, payment: P.Unknown,
+  })])
+  const a = (await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result
+  assert.equal(a.verdict, V.EvidenceUnreachable)
+  assert.equal(a.evidence, E.Unreachable)
+  assert.equal(a.payment, P.Attributed, 'the settlement did not stop having happened')
+  assert.equal(a.amount, 1_000_000n)
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributed', [1n, REVIEWER, 0n])).result, true)
+})
+
+await check('a pass that DOES re-evaluate the payment overwrites it', async () => {
+  // Sticky must not mean permanent: an explicit payment state always wins.
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [attributed()])
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.PaymentPartyMismatch, payment: P.PartyMismatch, paymentTx: TX2,
+    amount: 5n, paymentToken: TOKEN,
+  })])
+  const a = (await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result
+  assert.equal(a.payment, P.PartyMismatch)
+  assert.equal(a.paymentTx, TX2)
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributed', [1n, REVIEWER, 0n])).result, false)
+})
+
+await check('a pass that did not look at the file leaves the file alone', async () => {
+  /**
+   * The mirror of the sticky payment, and it was missing. A sweep driven by the
+   * narrower payment-claims export carries no documentary columns at all, so
+   * every row arrives as `Evidence.Unknown` — "this pass did not look at the
+   * file", not "the file is no longer intact". Writing it flipped
+   * hasIntactEvidence to false for files that were still intact, and returned
+   * every published accusation to "not evaluated".
+   */
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceIntact, evidence: E.Intact, evidenceHash: EH1, observedAt: 1_789_000_000,
+  })])
+  assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [1n, REVIEWER, 0n])).result, true)
+
+  // A later payment-only pass, exactly as the narrower export produces it.
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.PaymentAttributed, payment: P.Attributed, evidence: E.Unknown,
+    paymentTx: TX1, amount: 1_000_000n, paymentToken: TOKEN, amountDecimals: 6,
+    evidenceHash: ZERO32, observedAt: 1_789_100_000,
+  })])
+  const a = (await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result
+  assert.equal(a.evidence, E.Intact, 'the documentary state survived')
+  assert.equal(a.evidenceHash, EH1, 'and so did its cross-reference')
+  assert.equal(a.evidenceObservedAt, 1_789_000_000, 'and the date of the observation it came from')
+  assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [1n, REVIEWER, 0n])).result, true)
+  assert.equal(a.payment, P.Attributed, 'while the payment pass still applied')
+})
+
+await check('an accusation is not withdrawn by a pass that did not re-check it', async () => {
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [claim({ verdict: V.EvidenceAbsent, evidence: E.Absent })])
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.PaymentTxNotFound, payment: P.NotFound, evidence: E.Unknown, evidenceHash: ZERO32,
+  })])
+  assert.equal((await chain.call(STRANGER, addr, 'evidenceOf', [1n, REVIEWER, 0n])).result, E.Absent)
+})
+
+await check('a pass that DOES re-read the file overwrites it', async () => {
+  // Preserved must not mean frozen.
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [claim({ verdict: V.EvidenceIntact, evidence: E.Intact })])
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceUnreachable, evidence: E.Unreachable, evidenceHash: ZERO32,
+  })])
+  const a = (await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result
+  assert.equal(a.evidence, E.Unreachable)
+  assert.equal(a.evidenceHash, ZERO32)
+})
+
+await check('the event reports the stored state on both dimensions', async () => {
+  // An indexer rebuilding from logs alone must not disagree with a reader.
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceIntact, evidence: E.Intact, evidenceHash: EH1, observedAt: 1_789_000_000,
+  })])
+  const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.PaymentAttributed, payment: P.Attributed, evidence: E.Unknown,
+    paymentTx: TX1, amount: 1_000_000n, paymentToken: TOKEN, amountDecimals: 6,
+    evidenceHash: ZERO32, observedAt: 1_789_100_000,
+  })])
+  const a = only(r.logs, 'FeedbackAttested')
+  assert.equal(a.evidence, E.Intact)
+  assert.equal(a.evidenceHash, EH1)
+  assert.equal(a.evidenceObservedAt, 1_789_000_000)
+  assert.equal(a.payment, P.Attributed)
+  // …and beside it, what this pass actually claimed. Without both, a value
+  // carried forward and a value re-checked are the same log line.
+  assert.equal(a.statedEvidence, E.Unknown)
+  assert.equal(a.statedPayment, P.Attributed)
+})
+
+console.log('\nthe read surface')
+
+await check('hasIntactEvidence answers only about the file', async () => {
+  // v2 returned true for PaymentVerified, which asserts nothing about a file,
+  // so a router filtering on it held a guarantee it had not been given.
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.PaymentVerified, payment: P.Verified, paymentTx: TX1,
+    evidence: E.Unreachable, amount: 5n, paymentToken: TOKEN,
+  })])
+  assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [1n, REVIEWER, 0n])).result, false)
   assert.equal((await chain.call(STRANGER, addr, 'isPaymentBacked', [1n, REVIEWER, 0n])).result, true)
 })
 
-await check('isPaymentBacked is true only for PaymentVerified', async () => {
+await check('a merely verified payment is not an attributed one', async () => {
+  // The §3.1 attack: cite any real transfer on the chain. It reaches Verified
+  // and must not reach Attributed.
   const { chain, addr } = await fresh()
-  for (const v of [V.EvidenceIntact, V.EvidenceUnhashed, V.PaymentTxNotFound, V.PaymentTxFailed,
-                   V.PaymentNoValue, V.EvidenceUnreachable, V.EvidenceAbsent]) {
-    await chain.call(ATTESTER, addr, 'attest', [10n, REVIEWER, BigInt(v), v, ZERO32, EH1])
-    const backed = (await chain.call(STRANGER, addr, 'isPaymentBacked', [10n, REVIEWER, BigInt(v)])).result
-    assert.equal(backed, false, `verdict ${v} must not count as backed`)
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.PaymentVerified, payment: P.Verified, paymentTx: TX1,
+    amount: 500n, paymentToken: TOKEN,
+  })])
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentBacked', [1n, REVIEWER, 0n])).result, true)
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributed', [1n, REVIEWER, 0n])).result, false)
+})
+
+await check('a threshold can be applied in the same call', async () => {
+  // Dust and a five-hundred-dollar settlement reach the same rung, so the rung
+  // alone cannot mean "economically significant".
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [attributed({ amount: 1n })]) // 0.000001 USDC
+  const args = (min) => [1n, REVIEWER, 0n, min, TOKEN]
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributedAtLeast', args(1n))).result, true)
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributedAtLeast', args(1_000_000n))).result, false)
+})
+
+await check('a threshold in the wrong token does not pass', async () => {
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [attributed({ amount: 10_000_000n })])
+  const other = '0x00000000000000000000000000000000000000c2'
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributedAtLeast', [1n, REVIEWER, 0n, 1n, other])).result, false)
+})
+
+console.log('\ninvariants — a rung cannot contradict its own payload')
+
+await check('a rung asserting the transaction was found must carry it', async () => {
+  const { chain, addr } = await fresh()
+  // Each verdict paired with the payment state it implies, so the failure under
+  // test is the missing hash and not the dimension mismatch.
+  const pairs = [
+    [V.PaymentVerified, P.Verified],
+    [V.PaymentAttributed, P.Attributed],
+    [V.PaymentPartyMismatch, P.PartyMismatch],
+    [V.PaymentTxFailed, P.Failed],
+    [V.PaymentNoValue, P.NoValue],
+  ]
+  for (const [v, p] of pairs) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: v, payment: p, paymentTx: ZERO32, amount: 0n,
+    })])
+    assert.equal(r.selector, ERRORS.MissingPaymentTx, `verdict ${v} accepted a zero tx hash`)
   }
 })
 
-await check('records are keyed by the full tuple — no cross-talk', async () => {
+await check('NotFound and ForeignChain may carry no hash — a malformed claim has none', async () => {
   const { chain, addr } = await fresh()
-  await chain.call(ATTESTER, addr, 'attest', [1n, REVIEWER, 0n, V.PaymentVerified, TX1, EH1])
-  assert.equal((await chain.call(STRANGER, addr, 'isPaymentBacked', [1n, REVIEWER, 1n])).result, false)
-  assert.equal((await chain.call(STRANGER, addr, 'isPaymentBacked', [2n, REVIEWER, 0n])).result, false)
-  assert.equal((await chain.call(STRANGER, addr, 'isPaymentBacked', [1n, STRANGER, 0n])).result, false)
+  for (const [v, p] of [[V.PaymentTxNotFound, P.NotFound], [V.PaymentForeignChain, P.ForeignChain]]) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [claim({ verdict: v, payment: p, paymentTx: ZERO32 })])
+    assert.equal(r.reverted, false)
+  }
+})
+
+await check('an attributed payment that moved nothing is refused', async () => {
+  const { chain, addr } = await fresh()
+  const r = await chain.call(ATTESTER, addr, 'attest', [attributed({ amount: 0n })])
+  assert.equal(r.selector, ERRORS.IncoherentAmount)
+})
+
+await check('an amount denominated in no token is refused', async () => {
+  const { chain, addr } = await fresh()
+  const r = await chain.call(ATTESTER, addr, 'attest', [attributed({ paymentToken: ZERO_ADDR })])
+  assert.equal(r.selector, ERRORS.IncoherentAmount)
+})
+
+await check('an observation dated after the block recording it is refused', async () => {
+  const { chain, addr } = await fresh()
+  // The bare EVM reports block.timestamp 0, so any positive observedAt is in
+  // its future — which is exactly the condition under test.
+  const r = await chain.call(ATTESTER, addr, 'attest', [claim({ observedAt: 2_000_000_000 })])
+  assert.equal(r.selector, ERRORS.ObservationInFuture)
+})
+
+await check('the strong claim cannot be reached through the payment dimension alone', async () => {
+  /**
+   * The hole the verdict-only invariants left open. `isPaymentAttributed` and
+   * `isPaymentBacked` read the PAYMENT field, but validation only looked at
+   * `verdict` — so a claim whose headline was a harmless documentary rung could
+   * carry `payment: Attributed` with no transaction and no amount, pass every
+   * check, and then answer true to the strongest question in the system.
+   */
+  const { chain, addr } = await fresh()
+  const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceIntact, evidence: E.Intact,
+    payment: P.Attributed, paymentTx: ZERO32, amount: 0n, paymentToken: ZERO_ADDR,
+  })])
+  assert.equal(r.reverted, true, 'an attribution with nothing behind it was accepted')
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributed', [1n, REVIEWER, 0n])).result, false)
+})
+
+await check('every payment state asserting the transaction exists must name it', async () => {
+  const { chain, addr } = await fresh()
+  for (const p of [P.Verified, P.PartyMismatch, P.Failed, P.NoValue]) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: V.EvidenceIntact, evidence: E.Intact, payment: p, paymentTx: ZERO32,
+    })])
+    assert.equal(r.selector, ERRORS.MissingPaymentTx, `payment ${p} accepted a zero tx hash`)
+  }
+})
+
+await check('the headline and the payment dimension cannot name different outcomes', async () => {
+  // Otherwise an indexer reading `verdict` and a router reading
+  // `isPaymentAttributed` disagree about the same record.
+  const { chain, addr } = await fresh()
+  const bad = await chain.call(ATTESTER, addr, 'attest', [attributed({ payment: P.Unknown })])
+  assert.equal(bad.selector, ERRORS.DimensionMismatch)
+  const alsoBad = await chain.call(ATTESTER, addr, 'attest', [attributed({ payment: P.Verified })])
+  assert.equal(alsoBad.selector, ERRORS.DimensionMismatch)
+  assert.equal((await chain.call(ATTESTER, addr, 'attest', [attributed()])).reverted, false)
+})
+
+await check('the headline and the documentary dimension cannot disagree either', async () => {
+  // The payment side got this rule first; the file side was left open, so a
+  // headline of EvidenceAbsent could carry evidence: Intact and hasIntactEvidence
+  // then contradicted the verdict printed beside it.
+  const { chain, addr } = await fresh()
+  const bad = await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceAbsent, evidence: E.Intact,
+  })])
+  assert.equal(bad.selector, ERRORS.DimensionMismatch)
+  assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [1n, REVIEWER, 0n])).result, false)
+
+  const alsoBad = await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceIntact, evidence: E.Unreachable,
+  })])
+  assert.equal(alsoBad.selector, ERRORS.DimensionMismatch)
+})
+
+await check('a payment headline still says nothing about the file, either way', async () => {
+  // Which is the whole reason the second dimension exists: a payment rung may
+  // carry any documentary state, including Unknown.
+  const { chain, addr } = await fresh()
+  for (const e of [E.Unknown, E.Intact, E.Unreachable, E.Absent]) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [attributed({ evidence: e })])
+    assert.equal(r.reverted, false, `payment rung refused evidence ${e}`)
+  }
+})
+
+await check('a token with no amount is refused, like an amount with no token', async () => {
+  const { chain, addr } = await fresh()
+  const r = await chain.call(ATTESTER, addr, 'attest', [claim({ amount: 0n, paymentToken: TOKEN })])
+  assert.equal(r.selector, ERRORS.IncoherentAmount)
+})
+
+await check('a threshold of zero against no token does not pass for an unattested record', async () => {
+  // `isPaymentAttributedAtLeast(…, 0, 0x0)` must not be a free "yes".
+  const { chain, addr } = await fresh()
+  assert.equal(
+    (await chain.call(STRANGER, addr, 'isPaymentAttributedAtLeast', [1n, REVIEWER, 0n, 0n, ZERO_ADDR])).result,
+    false,
+  )
+})
+
+await check('a verdict beyond the enum is rejected, not silently coerced', async () => {
+  const { chain, addr } = await fresh()
+  const r = await chain.call(ATTESTER, addr, 'attest', [claim({ verdict: 14 })])
+  assert.equal(r.reverted, true)
 })
 
 console.log('\nevents')
 
-await check('FeedbackAttested carries the tuple, verdict and revision', async () => {
+await check('every attestation emits one event carrying the full state', async () => {
   const { chain, addr } = await fresh()
-  const r = await chain.call(ATTESTER, addr, 'attest', [5n, REVIEWER, 2n, V.PaymentNoValue, TX1, EH1])
-  const ev = r.logs.find((l) => l.eventName === 'FeedbackAttested')
-  assert.ok(ev, 'event emitted')
-  assert.equal(ev.args.agentId, 5n)
-  assert.equal(ev.args.clientAddress.toLowerCase(), REVIEWER)
-  assert.equal(ev.args.feedbackIndex, 2n)
-  assert.equal(ev.args.verdict, V.PaymentNoValue)
-  assert.equal(ev.args.paymentTx, TX1)
-  assert.equal(ev.args.revision, 1)
+  const r = await chain.call(ATTESTER, addr, 'attest', [attributed({ agentId: 42n, feedbackIndex: 5n })])
+  const a = only(r.logs, 'FeedbackAttested')
+  assert.equal(a.agentId, 42n)
+  assert.equal(a.clientAddress.toLowerCase(), REVIEWER)
+  assert.equal(a.feedbackIndex, 5n)
+  assert.equal(a.verdict, V.PaymentAttributed)
+  assert.equal(a.evidence, E.Intact)
+  assert.equal(a.payment, P.Attributed)
+  assert.equal(a.paymentTx, TX1)
+  assert.equal(a.evidenceHash, EH1)
+  assert.equal(a.amount, 1_000_000n)
+  assert.equal(a.paymentToken.toLowerCase(), TOKEN)
+  assert.equal(a.revision, 1)
+
+  // The payment payload the main event no longer carries is carried in full
+  // by the event that fires exactly when it can change.
+  const pa = only(r.logs, 'PaymentAttested')
+  assert.equal(pa.agentId, 42n)
+  assert.equal(pa.feedbackIndex, 5n)
+  assert.equal(pa.payment, P.Attributed)
+  assert.equal(pa.paymentTx, TX1)
+  assert.equal(pa.amount, 1_000_000n)
+  assert.equal(pa.paymentToken.toLowerCase(), TOKEN)
+  assert.equal(pa.amountDecimals, 6)
 })
 
-console.log('\nbatch')
-
-await check('attestBatch writes every row and enforces the attester gate', async () => {
+await check('a batch emits one event per element, so history stays reconstructable', async () => {
   const { chain, addr } = await fresh()
-  const rows = [
-    [1n, V.PaymentVerified, TX1],
-    [2n, V.PaymentTxNotFound, ZERO32],
-    [3n, V.EvidenceAbsent, ZERO32],
+  const batch = [
+    claim({ agentId: 1n, feedbackIndex: 0n }),
+    claim({ agentId: 2n, feedbackIndex: 1n, verdict: V.EvidenceAbsent, evidence: E.Absent }),
+    attributed({ agentId: 3n, feedbackIndex: 2n }),
   ]
-  const args = [
-    rows.map((r) => r[0]),
-    rows.map(() => REVIEWER),
-    rows.map(() => 0n),
-    rows.map((r) => r[1]),
-    rows.map((r) => r[2]),
-    rows.map(() => EH1),
-  ]
-  assert.equal((await chain.call(STRANGER, addr, 'attestBatch', args)).selector, ERRORS.NotAttester)
-  const ok = await chain.call(ATTESTER, addr, 'attestBatch', args)
-  assert.equal(ok.reverted, false)
-  assert.equal(ok.logs.filter((l) => l.eventName === 'FeedbackAttested').length, 3)
-  assert.equal((await chain.call(STRANGER, addr, 'isPaymentBacked', [1n, REVIEWER, 0n])).result, true)
-  assert.equal((await chain.call(STRANGER, addr, 'isPaymentBacked', [2n, REVIEWER, 0n])).result, false)
-})
-
-await check('attestBatch rejects mismatched array lengths', async () => {
-  const { chain, addr } = await fresh()
-  const r = await chain.call(ATTESTER, addr, 'attestBatch', [
-    [1n, 2n], [REVIEWER], [0n, 0n], [V.EvidenceIntact, V.EvidenceIntact], [ZERO32, ZERO32], [EH1, EH1],
-  ])
-  assert.equal(r.selector, ERRORS.LengthMismatch)
-})
-
-await check('a batch of 100 rows fits comfortably in a block', async () => {
-  const { chain, addr } = await fresh()
-  const n = 100
-  const args = [
-    Array.from({ length: n }, (_, i) => BigInt(i)),
-    Array(n).fill(REVIEWER),
-    Array(n).fill(0n),
-    Array(n).fill(V.EvidenceIntact),
-    Array(n).fill(ZERO32),
-    Array(n).fill(EH1),
-  ]
-  const r = await chain.call(ATTESTER, addr, 'attestBatch', args)
+  const r = await chain.call(ATTESTER, addr, 'attestBatch', [batch])
   assert.equal(r.reverted, false)
-  assert.ok(r.gasUsed < 8_000_000n, `gas ${r.gasUsed} should stay well under limits`)
-  console.log(`      (100 attestations: ${r.gasUsed} gas — ~${(Number(r.gasUsed) / n).toFixed(0)}/row)`)
-})
-
-
-
-console.log('\nevidence ladder (v2)')
-
-await check('the whole ladder is writable — every rung has a distinct verdict', async () => {
-  const { chain, addr } = await fresh()
-  const ladder = [
-    V.PaymentVerified, V.EvidenceIntact, V.EvidenceUnbound, V.EvidenceUnhashed,
-    V.PaymentTxNotFound, V.PaymentTxFailed, V.PaymentNoValue,
-    V.EvidenceUnreachable, V.EvidenceAbsent,
-  ]
-  for (const [i, v] of ladder.entries()) {
-    const r = await chain.call(ATTESTER, addr, 'attest', [BigInt(i), REVIEWER, 0n, v, ZERO32, EH1])
-    assert.equal(r.reverted, false, `verdict ${v} must be writable`)
-    const a = (await chain.call(STRANGER, addr, 'getAttestation', [BigInt(i), REVIEWER, 0n])).result
-    assert.equal(a.verdict, v)
-  }
-})
-
-await check('a verdict beyond the enum is rejected, not silently coerced', async () => {
-  // The reason v1 could not be widened in place: Solidity reverts on decoding
-  // an out-of-range enum, so the deployed value set is a hard boundary.
-  const { chain, addr } = await fresh()
-  const r = await chain.call(ATTESTER, addr, 'attest', [1n, REVIEWER, 0n, 10, ZERO32, EH1])
-  assert.equal(r.reverted, true)
-})
-
-await check('hasIntactEvidence accepts the two rungs where evidence held, and nothing else', async () => {
-  const { chain, addr } = await fresh()
-  const accepted = [V.PaymentVerified, V.EvidenceIntact]
-  const rejected = [V.EvidenceUnbound, V.EvidenceUnhashed, V.PaymentTxNotFound,
-                    V.PaymentTxFailed, V.PaymentNoValue, V.EvidenceUnreachable, V.EvidenceAbsent]
-  for (const v of accepted) {
-    await chain.call(ATTESTER, addr, 'attest', [BigInt(v), REVIEWER, 0n, v, ZERO32, EH1])
-    assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [BigInt(v), REVIEWER, 0n])).result, true, `verdict ${v}`)
-  }
-  for (const v of rejected) {
-    await chain.call(ATTESTER, addr, 'attest', [BigInt(v), REVIEWER, 0n, v, ZERO32, EH1])
-    assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [BigInt(v), REVIEWER, 0n])).result, false, `verdict ${v}`)
-  }
-})
-
-await check('an unattested record has neither intact evidence nor payment backing', async () => {
-  const { chain, addr } = await fresh()
-  assert.equal((await chain.call(STRANGER, addr, 'hasIntactEvidence', [42n, REVIEWER, 0n])).result, false)
-  assert.equal((await chain.call(STRANGER, addr, 'isPaymentBacked', [42n, REVIEWER, 0n])).result, false)
-})
-
-await check('totalAttestations counts writes, re-attestations included', async () => {
-  const { chain, addr } = await fresh()
-  assert.equal((await chain.call(STRANGER, addr, 'totalAttestations', [])).result, 0n)
-  await chain.call(ATTESTER, addr, 'attest', [1n, REVIEWER, 0n, V.EvidenceIntact, ZERO32, EH1])
-  await chain.call(ATTESTER, addr, 'attest', [1n, REVIEWER, 0n, V.PaymentVerified, TX1, EH1])
-  await chain.call(ATTESTER, addr, 'attest', [2n, REVIEWER, 0n, V.EvidenceAbsent, ZERO32, EH1])
+  const attested = r.logs.filter((l) => l.eventName === 'FeedbackAttested')
+  assert.equal(attested.length, 3)
+  assert.deepEqual(attested.map((l) => l.args.agentId), [1n, 2n, 3n])
+  // Only the third claim states a payment, so only it gets the second event.
+  const payments = r.logs.filter((l) => l.eventName === 'PaymentAttested')
+  assert.deepEqual(payments.map((l) => l.args.agentId), [3n])
   assert.equal((await chain.call(STRANGER, addr, 'totalAttestations', [])).result, 3n)
 })
 
-await check('an empty batch is rejected rather than counted as a no-op success', async () => {
+await check('the sticky payment state is what the event reports, not the blank input', async () => {
+  // An indexer rebuilding state from events alone must see the same thing a
+  // reader of the mapping sees.
   const { chain, addr } = await fresh()
-  const r = await chain.call(ATTESTER, addr, 'attestBatch', [[], [], [], [], [], []])
-  assert.equal(r.selector, ERRORS.EmptyBatch)
+  await chain.call(ATTESTER, addr, 'attest', [attributed()])
+  const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceUnreachable, evidence: E.Unreachable, payment: P.Unknown,
+  })])
+  const a = only(r.logs, 'FeedbackAttested')
+  assert.equal(a.paymentTx, TX1)
+  assert.equal(a.amount, 1_000_000n)
+  // The field itself, not only its payload: the event used to echo the caller's
+  // blank `Unknown` while the mapping kept `Attributed`, so an indexer
+  // rebuilding state from events alone disagreed with a direct reader.
+  assert.equal(a.payment, P.Attributed)
+  assert.equal(a.paymentToken.toLowerCase(), TOKEN)
+  // And the pass is legible as what it was: a documentary re-check that left
+  // the payment alone. A carry-forward must not look like a re-verification.
+  assert.equal(a.statedPayment, P.Unknown)
+  assert.equal(a.statedEvidence, E.Unreachable)
+  assert.equal(r.logs.filter((l) => l.eventName === 'PaymentAttested').length, 0)
+})
+
+console.log('\nbatching')
+
+await check('an empty batch is refused rather than reported as a success', async () => {
+  const { chain, addr } = await fresh()
+  assert.equal((await chain.call(ATTESTER, addr, 'attestBatch', [[]])).selector, ERRORS.EmptyBatch)
+})
+
+await check('one bad claim reverts the whole batch, leaving no partial write', async () => {
+  // A partially applied backfill is indistinguishable from a complete one at
+  // read time, and the resume marker would record progress that did not happen.
+  const { chain, addr } = await fresh()
+  const r = await chain.call(ATTESTER, addr, 'attestBatch', [[
+    claim({ agentId: 1n }),
+    claim({ agentId: 2n, verdict: V.PaymentVerified, payment: P.Verified, paymentTx: ZERO32 }),
+  ]])
+  assert.equal(r.selector, ERRORS.MissingPaymentTx)
+  assert.equal((await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result.verdict, V.None)
+  assert.equal((await chain.call(STRANGER, addr, 'totalAttestations', [])).result, 0n)
+})
+
+await check('a duplicate tuple inside one batch is applied twice, and says so', async () => {
+  // The contract cannot cheaply de-duplicate a batch, so it does not pretend
+  // to: both writes land and `revision` reaches 2. The backfill is what must
+  // refuse to build such a batch, and its own suite covers that.
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attestBatch', [[
+    claim({ verdict: V.EvidenceIntact, evidence: E.Intact }),
+    claim({ verdict: V.EvidenceUnreachable, evidence: E.Unreachable }),
+  ]])
+  const a = (await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result
+  assert.equal(a.revision, 2)
+  assert.equal(a.verdict, V.EvidenceUnreachable)
+})
+
+console.log('\ncoverage — what the attester did NOT write')
+
+await check('a sweep publishes what it covered, and only the attester may', async () => {
+  /**
+   * Events prove attestations. They cannot prove that everything which should
+   * have been attested was, so an attester with something to hide never had to
+   * lie — it only had to stay quiet, and silence left no trace. A sweep makes
+   * coverage a dated, attributable, refutable claim.
+   */
+  const { chain, addr } = await fresh()
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 0n)
+
+  // A claim cannot exceed what the contract has actually recorded, so write
+  // the records first — the number has to be a measurement, not an assertion.
+  await attestMany(chain, addr, 6)
+  const args = [100n, 200n, 8, 6, EH1]
+  assert.equal((await chain.call(STRANGER, addr, 'commitSweep', args)).selector, ERRORS.NotAttester)
+  assert.equal((await chain.call(OWNER, addr, 'commitSweep', args)).selector, ERRORS.NotAttester)
+
+  const r = await chain.call(ATTESTER, addr, 'commitSweep', args)
+  assert.equal(r.reverted, false)
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 1n)
+
+  const s = (await chain.call(STRANGER, addr, 'latestSweep', [])).result
+  assert.equal(s.fromBlock, 100n)
+  assert.equal(s.toBlock, 200n)
+  assert.equal(s.observed, 8)
+  assert.equal(s.attested, 6)
+  assert.equal(s.retracted, false)
+  assert.equal(s.recordsRoot, EH1)
+  assert.ok(s.committedAt > 0, 'a claim with no date cannot be aged')
+})
+
+await check('a sweep that contradicts itself is refused', async () => {
+  const { chain, addr } = await fresh()
+  // More attested than observed: the claim refutes itself before anyone checks.
+  await attestMany(chain, addr, 12)
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 10, 11, ZERO32])).selector,
+    ERRORS.AttestedExceedsObserved,
+  )
+  // …and a claim larger than everything this contract has ever written.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 9999, 9999, ZERO32])).selector,
+    ERRORS.AttestedExceedsWrites,
+  )
+  // An inverted range, and a range that is not yet mined.
+  assert.equal((await chain.call(ATTESTER, addr, 'commitSweep', [200n, 100n, 1, 1, ZERO32])).selector, ERRORS.InvalidRange)
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'commitSweep', [100n, 99_999_999n, 1, 1, ZERO32])).selector,
+    ERRORS.InvalidRange,
+  )
+})
+
+await check('a gap between observed and attested is published, not hidden', async () => {
+  // The gap is not necessarily wrong — a record can be legitimately out of
+  // scope — but it is now a number somebody can argue with.
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 4)
+  const r = await chain.call(ATTESTER, addr, 'commitSweep', [1n, 50n, 27520, 4, EH1])
+  assert.equal(r.logs.length, 1)
+  const a = r.logs[0].args
+  assert.equal(a.index, 0n)
+  assert.equal(a.observed, 27520)
+  assert.equal(a.attested, 4)
+  assert.equal(a.recordsRoot, EH1)
+})
+
+await check('sweeps are append-only, and coverage is queryable by block', async () => {
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 18)
+  await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 10, 10, ZERO32])
+  await chain.call(ATTESTER, addr, 'commitSweep', [201n, 300n, 20, 18, EH1])
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 2n)
+  assert.equal((await chain.call(STRANGER, addr, 'sweepAt', [0n])).result.toBlock, 200n)
+  assert.equal((await chain.call(STRANGER, addr, 'latestSweep', [])).result.fromBlock, 201n)
+
+  for (const [b, inside] of [[99n, false], [100n, true], [250n, true], [300n, true], [301n, false]]) {
+    assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [b])).result, inside, `block ${b}`)
+  }
+})
+
+await check('a service that never stated its coverage reads as never having stated it', async () => {
+  // Not as having covered nothing: the two are different claims and only one
+  // of them is true.
+  const { chain, addr } = await fresh()
+  assert.equal((await chain.call(STRANGER, addr, 'latestSweep', [])).reverted, true)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [150n])).result, false)
+})
+
+await check('a stale dimension keeps its own date, and the fresh one gets the new date', async () => {
+  /**
+   * One shared timestamp could not tell the truth about two dimensions updated
+   * independently: a payment-only sweep refreshed it, so a documentary verdict
+   * nobody had re-examined for months carried today's date and the reader had
+   * no way to tell a fresh answer from a stale one.
+   */
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceIntact, evidence: E.Intact, observedAt: 1_700_000_000,
+  })])
+  await chain.call(ATTESTER, addr, 'attest', [attributed({
+    evidence: E.Unknown, evidenceHash: ZERO32, observedAt: 1_780_000_000,
+  })])
+  const a = (await chain.call(STRANGER, addr, 'getAttestation', [1n, REVIEWER, 0n])).result
+  assert.equal(a.evidenceObservedAt, 1_700_000_000, 'the file was last looked at then, and says so')
+  assert.equal(a.paymentObservedAt, 1_780_000_000, 'the payment was looked at now')
+  assert.equal(a.evidence, E.Intact, 'and the stale verdict itself is untouched')
+})
+
+await check('an amount cannot sit beside a rung that says nothing moved', async () => {
+  const { chain, addr } = await fresh()
+  for (const [v, p] of [
+    [V.PaymentNoValue, P.NoValue],
+    [V.PaymentTxNotFound, P.NotFound],
+    [V.PaymentForeignChain, P.ForeignChain],
+  ]) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: v, payment: p, paymentTx: TX1, amount: 500n, paymentToken: TOKEN, amountDecimals: 6,
+    })])
+    assert.equal(r.selector, ERRORS.IncoherentAmount, `verdict ${v} accepted a settled amount`)
+  }
+})
+
+console.log('\ncoverage — cost, not just correctness')
+
+await check('the coverage lookup stays cheap however long the history gets', async () => {
+  /**
+   * A linear scan here cost 2,543 + 2,753 per sweep: eleven thousand junk
+   * sweeps — about five dollars — pushed it past the block gas limit forever,
+   * in a contract with no purge and no proxy. The attester could brick the one
+   * read that incriminates it. Honest operation hit the same wall in fifteen
+   * months.
+   */
+  const { chain, addr } = await fresh()
+  // Each claim asserts one attested record, so write one per sweep first.
+  await attestMany(chain, addr, 1024)
+  // Contiguous claims, exactly as a repeating census produces them.
+  const commit = (i) => chain.call(ATTESTER, addr, 'commitSweep', [0n, BigInt(i * 10 + 9), 1, 1, ZERO32])
+  const worstCase = async () => (await chain.call(STRANGER, addr, 'isWithinSweep', [9_999_999n])).gasUsed
+
+  for (let i = 0; i < 64; i++) await commit(i)
+  const at64 = await worstCase()
+  for (let i = 64; i < 1024; i++) await commit(i)
+  const at1024 = await worstCase()
+
+  // The answer must still be right at both ends of the covered span.
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [5n])).result, true)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [10_239n])).result, true)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [10_240n])).result, false)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [9_999_999n])).result, false)
+
+  // Sixteen times the history, the same price: coverage is one interval, so
+  // there is nothing to search and nothing the attester can inflate.
+  assert.equal(at1024, at64, `the lookup got more expensive: ${at64} -> ${at1024}`)
+  assert.ok(at1024 < 10_000n, `a single lookup costs ${at1024} gas`)
+})
+
+await check('re-sweeping covered ground is allowed; reaching back before it is not', async () => {
+  /**
+   * This rule used to demand a strictly LATER fromBlock, so that ranges were
+   * disjoint and the lookup could binary-search them. It made the feature
+   * unusable: the census sweeps from the registry's deployment block every
+   * pass, so the second run reverted here after paying for the whole backfill.
+   *
+   * Overlap is the normal case and is allowed. Reaching back BEFORE where
+   * coverage began is not: that is a different claim from "I swept further",
+   * and making it silently would move the floor under every answer this
+   * contract has already given.
+   */
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 10)
+  await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 10, 10, ZERO32])
+
+  for (const [from, to] of [[100n, 300n], [150n, 400n], [201n, 450n]]) {
+    const r = await chain.call(ATTESTER, addr, 'commitSweep', [from, to, 1, 1, ZERO32])
+    assert.equal(r.reverted, false, `overlapping range ${from}-${to} was refused`)
+  }
+  const back = await chain.call(ATTESTER, addr, 'commitSweep', [50n, 500n, 1, 1, ZERO32])
+  assert.equal(back.selector, ERRORS.InvalidRange, 'coverage must not silently extend backwards')
+})
+
+await check('a claim can be withdrawn, and the withdrawal is on the record', async () => {
+  /**
+   * Ranges are strictly ordered so the lookup stays cheap, which means a sweep
+   * committed with wrong numbers can never be re-committed. Retraction is the
+   * only correction available and deliberately not an erasure: the entry stays,
+   * dated and attributable, with its withdrawal beside it.
+   */
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 4)
+  await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 10, 4, EH1])
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [150n])).result, true)
+
+  assert.equal((await chain.call(STRANGER, addr, 'retractSweep', [0n])).selector, ERRORS.NotAttester)
+  const r = await chain.call(ATTESTER, addr, 'retractSweep', [0n])
+  assert.equal(r.reverted, false)
+  assert.equal(r.logs.length, 1)
+  assert.equal(r.logs[0].args.index, 0n)
+
+  // A withdrawn claim covers nothing…
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [150n])).result, false)
+  // …but the entry and its original numbers stay readable.
+  const s = (await chain.call(STRANGER, addr, 'sweepAt', [0n])).result
+  assert.equal(s.retracted, true)
+  assert.equal(s.observed, 10)
+  assert.equal(s.attested, 4)
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 1n)
+
+  // Withdrawing twice, or withdrawing nothing, is refused rather than silent.
+  assert.equal((await chain.call(ATTESTER, addr, 'retractSweep', [0n])).selector, ERRORS.NoSuchSweep)
+  assert.equal((await chain.call(ATTESTER, addr, 'retractSweep', [9n])).selector, ERRORS.NoSuchSweep)
+})
+
+console.log('\nsurface')
+
+await check('the key mirrors the registry tuple exactly', async () => {
+  const { chain, addr } = await fresh()
+  const k = (await chain.call(STRANGER, addr, 'key', [7n, REVIEWER, 3n])).result
+  const { keccak256, encodeAbiParameters: enc } = await import('viem')
+  const expected = keccak256(enc(
+    [{ type: 'uint256' }, { type: 'address' }, { type: 'uint64' }],
+    [7n, REVIEWER, 3n],
+  ))
+  assert.equal(k, expected)
+})
+
+await check('the contract holds no funds and offers no way in', async () => {
+  const { readFileSync } = await import('node:fs')
+  // The ABI is the real proof for value: it reports the compiler's own view of
+  // every entry point, where prose in a comment proves nothing.
+  const { ABI } = await import('./harness.mjs')
+  const payables = ABI.filter((e) => e.stateMutability === 'payable')
+  assert.deepEqual(payables, [], 'no function may accept value')
+  assert.ok(!ABI.some((e) => e.type === 'receive' || e.type === 'fallback'), 'no receive or fallback')
+
+  // Comments stripped, so the check is about the code and not about the text
+  // describing it.
+  const code = readFileSync('contracts/ProvenanceAttestations.sol', 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '')
+  for (const forbidden of ['payable', 'selfdestruct', 'delegatecall', 'call{', 'import ', 'assembly']) {
+    assert.ok(!code.includes(forbidden), `contract code should not contain "${forbidden}"`)
+  }
+})
+
+await check('every frozen deployment still compiles', async () => {
+  // A repository that cannot rebuild the bytecode of a contract it still has
+  // live has quietly withdrawn it, and falsifiability is the whole premise.
+  const { execFileSync } = await import('node:child_process')
+  const { readdirSync } = await import('node:fs')
+  const frozen = readdirSync('contracts/deployed').filter((f) => f.endsWith('.sol'))
+  assert.ok(frozen.length >= 2, 'v2 and v3 are both live and must both stay buildable')
+  for (const f of frozen) {
+    const out = execFileSync('node', ['script/compile.mjs'], {
+      env: { ...process.env, CONTRACT_SOURCE: `contracts/deployed/${f}` }, encoding: 'utf8',
+    })
+    assert.match(out, /compiled: ProvenanceAttestations/, `${f} failed to compile`)
+  }
+  execFileSync('node', ['script/compile.mjs'], { encoding: 'utf8' }) // restore v4 artifacts
+})
+
+await check('the frozen v2 source still compiles, so the live deployment stays verifiable', async () => {
+  // Falsifiability is the premise: a repository that can no longer reproduce
+  // the bytecode of its own live contract has quietly withdrawn it.
+  const { execFileSync } = await import('node:child_process')
+  const out = execFileSync('node', ['script/compile.mjs'], {
+    env: { ...process.env, CONTRACT_SOURCE: 'contracts/deployed/ProvenanceAttestationsV2.sol' },
+    encoding: 'utf8',
+  })
+  assert.match(out, /compiled: ProvenanceAttestations/)
+  // Restore the v3 artifacts the rest of the suite and the deploy script use.
+  execFileSync('node', ['script/compile.mjs'], { encoding: 'utf8' })
+})
+
+await check('a second full-history pass can publish its coverage', async () => {
+  /**
+   * The census sweeps from the registry's deployment block every time — that
+   * is what "full history" means, and AUDIT_WINDOW=all is the default. The
+   * ordering rule I added to keep the lookup cheap demanded a strictly LATER
+   * fromBlock, so every run after the first paid for the whole backfill and
+   * then reverted on the one call the run exists to make. The coverage layer
+   * could publish exactly once in its lifetime.
+   */
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 20)
+  const DEPLOY = 58_396_729n
+
+  const first = await chain.call(ATTESTER, addr, 'commitSweep', [DEPLOY, 76_000_000n, 20, 20, ZERO32])
+  assert.equal(first.reverted, false)
+
+  // The same range, one block further on: what the next census produces.
+  const second = await chain.call(ATTESTER, addr, 'commitSweep', [DEPLOY, 76_050_000n, 20, 20, ZERO32])
+  assert.equal(second.reverted, false, `a re-sweep reverted with ${second.selector}`)
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 2n)
+
+  // Coverage is the union, and the newly swept blocks are inside it.
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [76_020_000n])).result, true)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [DEPLOY])).result, true)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [DEPLOY - 1n])).result, false)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [76_050_001n])).result, false)
+})
+
+await check('coverage must advance and may not leave a hole behind it', async () => {
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 20)
+  await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 20, 20, ZERO32])
+
+  // Not advancing the frontier claims nothing new.
+  for (const [from, to] of [[100n, 200n], [150n, 199n], [0n, 50n]]) {
+    const r = await chain.call(ATTESTER, addr, 'commitSweep', [from, to, 1, 1, ZERO32])
+    assert.equal(r.selector, ERRORS.InvalidRange, `accepted a non-advancing [${from},${to}]`)
+  }
+  // A gap would make "inside a swept range" a lie for the blocks in between.
+  const gap = await chain.call(ATTESTER, addr, 'commitSweep', [300n, 400n, 1, 1, ZERO32])
+  assert.equal(gap.selector, ERRORS.CoverageGap)
+  // Butting up against the frontier is contiguous, and allowed.
+  const next = await chain.call(ATTESTER, addr, 'commitSweep', [201n, 400n, 1, 1, ZERO32])
+  assert.equal(next.reverted, false)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [250n])).result, true)
+})
+
+await check('withdrawing a coverage claim rolls the frontier back with it', async () => {
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 20)
+  await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 20, 20, ZERO32])
+  await chain.call(ATTESTER, addr, 'commitSweep', [100n, 300n, 20, 20, ZERO32])
+
+  // Only the newest claim can be withdrawn: withdrawing one the later claims
+  // have already superseded would say nothing about what is covered.
+  assert.equal((await chain.call(ATTESTER, addr, 'retractSweep', [0n])).selector, ERRORS.NotLatestSweep)
+
+  assert.equal((await chain.call(ATTESTER, addr, 'retractSweep', [1n])).reverted, false)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [250n])).result, false,
+    'the withdrawn range must stop reading as covered')
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [150n])).result, true,
+    'and what the earlier claim still covers must remain covered')
+
+  // The entry itself stays, with its original numbers and its withdrawal.
+  const sw = (await chain.call(STRANGER, addr, 'sweepAt', [1n])).result
+  assert.equal(sw.retracted, true)
+  assert.equal(sw.toBlock, 300n)
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 2n)
+
+  // Withdraw the last live one and the service reads as never having stated
+  // its coverage — not as having covered nothing.
+  assert.equal((await chain.call(ATTESTER, addr, 'retractSweep', [0n])).reverted, false)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [150n])).result, false)
+  // …and it can start again afterwards.
+  assert.equal((await chain.call(ATTESTER, addr, 'commitSweep', [100n, 400n, 20, 20, ZERO32])).reverted, false)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [350n])).result, true)
+})
+
+await check('the three payment reads, on every payment state there is', async () => {
+  /**
+   * Every call to isPaymentAttributedAtLeast in the suite was aimed at a
+   * record written by the `attributed()` helper, or at one never attested at
+   * all. So the guarantee it exists to give — that a merely *verified*
+   * transfer, which anyone may cite, can never satisfy a threshold filter —
+   * was asserted nowhere. The implementation is right; nothing was holding it
+   * to that.
+   *
+   * A table over all nine payment states, so a tenth cannot be added without
+   * someone deciding what these three answer for it.
+   */
+  const { chain, addr } = await fresh()
+  const OBS = BLOCK_TIMESTAMP - 86_400n
+  const rows = [
+    // [payment, verdict, evidence, carries a tx?, carries an amount?]
+    [P.Unknown,       V.EvidenceIntact,        E.Intact,  false, false],
+    [P.Attributed,    V.PaymentAttributed,     E.Unknown, true,  true ],
+    [P.Verified,      V.PaymentVerified,       E.Unknown, true,  true ],
+    [P.PartyMismatch, V.PaymentPartyMismatch,  E.Unknown, true,  true ],
+    [P.NoValue,       V.PaymentNoValue,        E.Unknown, true,  false],
+    [P.Failed,        V.PaymentTxFailed,       E.Unknown, true,  false],
+    [P.NotFound,      V.PaymentTxNotFound,     E.Unknown, false, false],
+    [P.ForeignChain,  V.PaymentForeignChain,   E.Unknown, false, false],
+    [P.NotDeclared,   V.EvidenceIntact,        E.Intact,  false, false],
+  ]
+
+  for (let i = 0; i < rows.length; i++) {
+    const [payment, verdict, evidence, hasTx, hasAmount] = rows[i]
+    const id = BigInt(i + 1)
+    const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+      agentId: id, feedbackIndex: 0n, verdict, evidence, payment,
+      evidenceHash: evidence === E.Unknown ? ZERO32 : EH1,
+      paymentTx: hasTx ? TX1 : ZERO32,
+      amount: hasAmount ? 1_000_000n : 0n,
+      paymentToken: hasAmount ? TOKEN : ZERO_ADDR,
+      amountDecimals: hasAmount ? 6 : 0,
+      observedAt: Number(OBS),
+    })])
+    assert.equal(r.reverted, false, `state ${payment} was refused: ${r.selector}`)
+
+    const read = async (fn, extra = []) =>
+      (await chain.call(STRANGER, addr, fn, [id, REVIEWER, 0n, ...extra])).result
+
+    // Attribution is exactly one state. Nothing else may satisfy it.
+    assert.equal(await read('isPaymentAttributed'), payment === P.Attributed, `isPaymentAttributed on ${payment}`)
+
+    // The threshold filter is attribution PLUS an amount. A verified transfer
+    // — which anyone may cite, pointing at anybody's payment — must never
+    // pass it, however large the sum beside it.
+    assert.equal(
+      await read('isPaymentAttributedAtLeast', [1n, TOKEN]), payment === P.Attributed,
+      `isPaymentAttributedAtLeast on ${payment}`,
+    )
+    // …and a threshold above what settled fails even for the attributed one.
+    assert.equal(await read('isPaymentAttributedAtLeast', [1_000_001n, TOKEN]), false)
+    // …as does the right amount in the wrong token.
+    assert.equal(await read('isPaymentAttributedAtLeast', [1n, ZERO_ADDR]), false)
+
+    /**
+     * The weak read is broad, but not unconditional. PartyMismatch is excluded
+     * although its transaction DID settle: there the document says A paid B
+     * and the chain says C paid D, so the citation is not unproven, it is
+     * refuted — and a record the chain contradicts must not read as backed by
+     * anything. Failed and NoValue are out for the plainer reason that nothing
+     * settled.
+     */
+    const settles = payment === P.Attributed || payment === P.Verified
+    assert.equal(await read('isPaymentBacked'), settles, `isPaymentBacked on ${payment}`)
+  }
+
+  // And a record nobody ever attested answers false to all three.
+  const never = async (fn, extra = []) =>
+    (await chain.call(STRANGER, addr, fn, [999n, REVIEWER, 0n, ...extra])).result
+  assert.equal(await never('isPaymentAttributed'), false)
+  assert.equal(await never('isPaymentBacked'), false)
+  assert.equal(await never('isPaymentAttributedAtLeast', [0n, ZERO_ADDR]), false)
+})
+
+await check('every implied pairing is exercised, not two of thirteen', async () => {
+  /**
+   * The cross-dimension rule was tested on two documentary rungs out of six
+   * and two payment rungs out of seven, so most branches of _impliedPayment
+   * and _impliedEvidence could have been deleted without a test noticing. Both
+   * tables, end to end: the right dimension is accepted, a wrong one refused.
+   */
+  const { chain, addr } = await fresh()
+  const OBS = Number(BLOCK_TIMESTAMP - 86_400n)
+  const pairs = [
+    [V.EvidenceIntact, 'evidence', E.Intact], [V.EvidenceUnbound, 'evidence', E.Unbound],
+    [V.EvidenceUnhashed, 'evidence', E.Unhashed], [V.EvidenceUnreachable, 'evidence', E.Unreachable],
+    [V.EvidenceInconclusive, 'evidence', E.Inconclusive], [V.EvidenceAbsent, 'evidence', E.Absent],
+    [V.PaymentAttributed, 'payment', P.Attributed], [V.PaymentVerified, 'payment', P.Verified],
+    [V.PaymentPartyMismatch, 'payment', P.PartyMismatch], [V.PaymentNoValue, 'payment', P.NoValue],
+    [V.PaymentTxFailed, 'payment', P.Failed], [V.PaymentTxNotFound, 'payment', P.NotFound],
+    [V.PaymentForeignChain, 'payment', P.ForeignChain],
+  ]
+
+  let id = 0
+  for (const [verdict, dim, right] of pairs) {
+    const isPay = dim === 'payment'
+    const needsTx = [V.PaymentAttributed, V.PaymentVerified, V.PaymentPartyMismatch,
+                     V.PaymentNoValue, V.PaymentTxFailed].includes(verdict)
+    const needsAmount = verdict === V.PaymentAttributed
+    const base = (over) => claim({
+      agentId: BigInt(++id), feedbackIndex: 0n, verdict, observedAt: OBS,
+      evidence: isPay ? E.Unknown : right,
+      payment: isPay ? right : P.Unknown,
+      evidenceHash: isPay ? ZERO32 : EH1,
+      paymentTx: needsTx ? TX1 : ZERO32,
+      amount: needsAmount ? 1_000_000n : 0n,
+      paymentToken: needsAmount ? TOKEN : ZERO_ADDR,
+      amountDecimals: needsAmount ? 6 : 0,
+      ...over,
+    })
+    assert.equal((await chain.call(ATTESTER, addr, 'attest', [base({})])).reverted, false,
+      `the right pairing for verdict ${verdict} was refused`)
+
+    // Any other value for that dimension must be refused.
+    const wrong = isPay
+      ? { payment: right === P.Verified ? P.Attributed : P.Verified }
+      : { evidence: right === E.Intact ? E.Absent : E.Intact }
+    const r = await chain.call(ATTESTER, addr, 'attest', [base({ agentId: BigInt(++id), ...wrong })])
+    assert.equal(r.selector, ERRORS.DimensionMismatch,
+      `verdict ${verdict} accepted a contradicting ${dim}`)
+  }
+})
+
+await check('the sweep events name the entry they are about', async () => {
+  // Both tests that read a sweep log had exactly one sweep in state, so the
+  // expected index was 0 in both and neither exercised `_sweeps.length - 1`.
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 5)
+  const first = await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 5, 5, ZERO32])
+  assert.equal(only(first.logs, 'SweepCommitted').index, 0n)
+  const second = await chain.call(ATTESTER, addr, 'commitSweep', [100n, 300n, 5, 5, EH1])
+  const ev = only(second.logs, 'SweepCommitted')
+  assert.equal(ev.index, 1n)
+  assert.equal(ev.toBlock, 300n)
+  assert.equal(ev.recordsRoot, EH1)
+  const back = await chain.call(ATTESTER, addr, 'retractSweep', [1n])
+  const rv = only(back.logs, 'SweepRetracted')
+  assert.equal(rv.index, 1n, 'the withdrawal named the wrong entry')
+  assert.equal(rv.toBlock, 300n)
+})
+
+await check('PaymentAttested names the reviewer and the date it looked', async () => {
+  // Two of its nine fields — the indexed clientAddress and observedAt — were
+  // read by no assertion anywhere, and the address is a topic a consumer
+  // filters on.
+  const { chain, addr } = await fresh()
+  const OBS = Number(BLOCK_TIMESTAMP - 3_600n)
+  await chain.call(ATTESTER, addr, 'attest', [attributed({ observedAt: OBS })])
+  const r = await chain.call(ATTESTER, addr, 'attest', [attributed({ agentId: 2n, observedAt: OBS })])
+  const ev = only(r.logs, 'PaymentAttested')
+  assert.equal(ev.clientAddress.toLowerCase(), REVIEWER)
+  assert.equal(ev.observedAt, OBS)
+})
+
+console.log('\ndeclaring nothing is a finding, not a silence')
+
+await check('a document that declares no payment is distinguishable from one nobody read', async () => {
+  /**
+   * Three states used to share one stored zero: "no pass has evaluated the
+   * payment", "the claim was malformed or on a chain we do not query", and
+   * "the file declares no payment at all". A consumer separating reviews that
+   * claim a payment from reviews that do not therefore put a fraudulent claim
+   * in the same bucket as an honest review that never made one — which is the
+   * exact population this ledger exists to name.
+   */
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    agentId: 1n, feedbackIndex: 0n, payment: P.NotDeclared,
+  })])
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    agentId: 2n, feedbackIndex: 1n, payment: P.Unknown,
+  })])
+  await chain.call(ATTESTER, addr, 'attest', [claim({
+    agentId: 3n, feedbackIndex: 2n, verdict: V.PaymentTxNotFound, payment: P.NotFound,
+    evidence: E.Unknown, evidenceHash: ZERO32,
+  })])
+
+  assert.equal((await chain.call(STRANGER, addr, 'paymentOf', [1n, REVIEWER, 0n])).result, P.NotDeclared)
+  assert.equal((await chain.call(STRANGER, addr, 'paymentOf', [2n, REVIEWER, 1n])).result, P.Unknown)
+  assert.equal((await chain.call(STRANGER, addr, 'paymentOf', [3n, REVIEWER, 2n])).result, P.NotFound)
+  // All three still read 0x0 for paymentTx — which is precisely why the rung,
+  // not the hash, has to be what a consumer sorts on.
+  for (const [id, idx] of [[1n, 0n], [2n, 1n], [3n, 2n]]) {
+    const a = (await chain.call(STRANGER, addr, 'getAttestation', [id, REVIEWER, idx])).result
+    assert.equal(a.paymentTx, ZERO32)
+  }
+})
+
+await check('NotDeclared cannot arrive carrying the payment it denies', async () => {
+  const { chain, addr } = await fresh()
+  for (const over of [
+    { paymentTx: TX1 },
+    { amount: 5n, paymentToken: TOKEN },
+    { paymentToken: TOKEN },
+  ]) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [claim({ payment: P.NotDeclared, ...over })])
+    assert.equal(r.selector, ERRORS.IncoherentAmount, `accepted ${JSON.stringify(over, (k, v) => typeof v === 'bigint' ? String(v) : v)}`)
+  }
+  // …and it cannot sit under a headline that names a payment outcome either.
+  const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.PaymentTxNotFound, evidence: E.Unknown, payment: P.NotDeclared, evidenceHash: ZERO32,
+  })])
+  assert.equal(r.selector, ERRORS.DimensionMismatch)
+})
+
+await check('a finding overwrites, and only a silence is carried forward', async () => {
+  // NotDeclared is a claim about the document, so unlike Unknown it must
+  // replace what is stored. Getting this backwards would let a later pass
+  // erase an attributed payment by simply not finding it in a changed file —
+  // or, the other way, freeze a record at a value nobody re-checked.
+  const { chain, addr } = await fresh()
+  await chain.call(ATTESTER, addr, 'attest', [attributed()])
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributed', [1n, REVIEWER, 0n])).result, true)
+
+  await chain.call(ATTESTER, addr, 'attest', [claim({ payment: P.Unknown })])
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributed', [1n, REVIEWER, 0n])).result, true,
+    'a pass that did not look must not withdraw a published finding')
+
+  await chain.call(ATTESTER, addr, 'attest', [claim({ payment: P.NotDeclared })])
+  assert.equal((await chain.call(STRANGER, addr, 'paymentOf', [1n, REVIEWER, 0n])).result, P.NotDeclared,
+    'a pass that read the file and found no claim must be recorded')
+  assert.equal((await chain.call(STRANGER, addr, 'isPaymentAttributed', [1n, REVIEWER, 0n])).result, false)
+})
+
+console.log('\nthe log is the history')
+
+await check('a payment pass is subscribable by its rung, and its absence is information', async () => {
+  /**
+   * FeedbackAttested indexes `verdict`, a merged headline. Since the two
+   * dimensions separated, the honest pipeline routinely writes an attributed
+   * payment under a documentary verdict — so an integrator filtering verdict
+   * topics for attributed payments and one calling isPaymentAttributed get
+   * different sets from the same chain, with nothing signalling the divergence.
+   */
+  const { chain, addr } = await fresh()
+  const paid = await chain.call(ATTESTER, addr, 'attest', [claim({
+    verdict: V.EvidenceIntact, evidence: E.Intact, payment: P.Attributed,
+    paymentTx: TX1, amount: 7n, paymentToken: TOKEN, amountDecimals: 6,
+  })])
+  const pa = only(paid.logs, 'PaymentAttested')
+  assert.equal(pa.payment, P.Attributed)
+  assert.equal(only(paid.logs, 'FeedbackAttested').verdict, V.EvidenceIntact,
+    'the headline says nothing about the payment — which is the whole point')
+
+  // A pass that did not look at the payment emits no payment event at all, so
+  // "when was this last verified" is answerable from the log alone.
+  const carried = await chain.call(ATTESTER, addr, 'attest', [claim({ payment: P.Unknown })])
+  assert.equal(carried.logs.filter((l) => l.eventName === 'PaymentAttested').length, 0)
+  assert.equal(only(carried.logs, 'FeedbackAttested').payment, P.Attributed,
+    'the merged state is still reported, so a replaying indexer stays correct')
+  assert.equal(only(carried.logs, 'FeedbackAttested').statedPayment, P.Unknown,
+    'and the claim is reported beside it, so a carry-forward is not a re-check')
+})
+
+console.log('\nreading an empty coverage history')
+
+await check('a service that never stated its coverage says so, without looking broken', async () => {
+  // `_sweeps[length - 1]` on an empty array reverts Panic(0x11) — an arithmetic
+  // underflow, which every convention reads as a contract bug. A legitimate
+  // operating state was indistinguishable from a broken contract.
+  const { chain, addr } = await fresh()
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 0n)
+  assert.equal((await chain.call(STRANGER, addr, 'latestSweep', [])).selector, ERRORS.NoSuchSweep)
+  assert.equal((await chain.call(STRANGER, addr, 'sweepAt', [0n])).selector, ERRORS.NoSuchSweep)
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [1n])).result, false)
+
+  await attestMany(chain, addr, 1)
+  await chain.call(ATTESTER, addr, 'commitSweep', [100n, 200n, 1, 1, ZERO32])
+  assert.equal((await chain.call(STRANGER, addr, 'latestSweep', [])).result.fromBlock, 100n)
+  assert.equal((await chain.call(STRANGER, addr, 'sweepAt', [1n])).selector, ERRORS.NoSuchSweep)
+})
+
+console.log('\nwithdrawing a coverage claim, more than once')
+
+/**
+ * v4 could not do this at all.
+ *
+ * `_sweeps` only grows — a retraction MARKS its entry and never removes it —
+ * while `_liveSweeps` shrinks. v4's guard compared the caller's array index
+ * against `_liveSweeps - 1`, so the two namespaces diverged permanently at the
+ * first retraction: the newest standing claim was refused with NotLatestSweep,
+ * the index the guard demanded was refused with NoSuchSweep, and the frontier
+ * roll-back read `_sweeps[_liveSweeps - 1]` — often an entry that was itself
+ * withdrawn. Since the frontier can only ever advance, retractSweep is the ONLY
+ * way to withdraw a claim, so one use made every published range irrevocable.
+ */
+await check('the newest standing claim can be withdrawn, after any history', async () => {
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 1)
+  const commit = (f, t) => chain.call(ATTESTER, addr, 'commitSweep', [BigInt(f), BigInt(t), 10, 1, ZERO32])
+  const retract = (i) => chain.call(ATTESTER, addr, 'retractSweep', [BigInt(i)])
+  const cov = async () => (await chain.call(STRANGER, addr, 'coverage', [])).result
+
+  assert.equal((await commit(100, 200)).reverted, false)   // index 0
+  assert.equal((await commit(201, 300)).reverted, false)   // index 1
+  assert.equal((await retract(1)).reverted, false)
+  assert.equal((await commit(201, 400)).reverted, false)   // index 2
+  assert.equal((await commit(401, 500)).reverted, false)   // index 3
+
+  // The newest STANDING claim is #3. v4 refused exactly this.
+  assert.equal((await retract(3)).reverted, false, 'the newest standing claim must be withdrawable')
+  // And a claim later ones have superseded is refused, which is the guard's job.
+  assert.equal((await retract(1)).selector, ERRORS.NoSuchSweep, 'already withdrawn')
+  assert.equal((await retract(0)).selector, ERRORS.NotLatestSweep, 'superseded by #2')
+
+  // #2 is now the newest standing one.
+  assert.equal((await retract(2)).reverted, false)
+  const [from, to, live] = await cov()
+  assert.deepEqual([from, to, live], [100n, 200n, 1n], 'the frontier is what sweep #0 left')
+})
+
+await check('the frontier restores exactly, and only standing claims are covered', async () => {
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 1)
+  const commit = (f, t) => chain.call(ATTESTER, addr, 'commitSweep', [BigInt(f), BigInt(t), 10, 1, ZERO32])
+  const retract = (i) => chain.call(ATTESTER, addr, 'retractSweep', [BigInt(i)])
+  const within = async (b) => (await chain.call(STRANGER, addr, 'isWithinSweep', [BigInt(b)])).result
+
+  await commit(100, 200)   // 0
+  await commit(201, 300)   // 1
+  await retract(1)
+  await commit(201, 400)   // 2
+  await commit(401, 500)   // 3
+  await retract(3)
+
+  /**
+   * v4 reported (100, 300) here — taken from WITHDRAWN sweep #1 — so
+   * isWithinSweep(250) answered true for a block no standing claim covered and
+   * isWithinSweep(450) answered false for one that a standing claim did. That
+   * read is the contract's whole accountability argument: `None` inside a swept
+   * range is the accusation. It lied in both directions.
+   */
+  const [from, to] = (await chain.call(STRANGER, addr, 'coverage', [])).result
+  assert.deepEqual([from, to], [100n, 400n], 'the frontier is sweep #2, the newest standing one')
+  assert.equal(await within(250), true, '250 is inside standing sweep #2')
+  assert.equal(await within(450), false, '450 was only ever covered by the withdrawn #3')
+
+  // Withdrawal marks, never erases: every entry is still readable and dated.
+  assert.equal((await chain.call(STRANGER, addr, 'sweepCount', [])).result, 4n)
+  for (const [i, want] of [[0, false], [1, true], [2, false], [3, true]]) {
+    const sw = (await chain.call(STRANGER, addr, 'sweepAt', [BigInt(i)])).result
+    assert.equal(sw.retracted, want, `sweep #${i} retracted flag`)
+  }
+})
+
+await check('unwinding every claim returns the ledger to having stated nothing', async () => {
+  const { chain, addr } = await fresh()
+  await attestMany(chain, addr, 1)
+  for (const [f, t] of [[100, 199], [200, 299], [300, 399]]) {
+    await chain.call(ATTESTER, addr, 'commitSweep', [BigInt(f), BigInt(t), 10, 1, ZERO32])
+  }
+  for (const i of [2, 1, 0]) {
+    assert.equal((await chain.call(ATTESTER, addr, 'retractSweep', [BigInt(i)])).reverted, false)
+  }
+  const [from, to, live] = (await chain.call(STRANGER, addr, 'coverage', [])).result
+  assert.deepEqual([from, to, live], [0n, 0n, 0n], 'no claim stands, so nothing is covered')
+  assert.equal((await chain.call(STRANGER, addr, 'isWithinSweep', [150n])).result, false)
+  // …and stating coverage again starts from a clean floor, not from the old one.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'commitSweep', [900n, 999n, 10, 1, ZERO32])).reverted, false,
+    'with nothing standing, any range is a first claim',
+  )
+})
+
+console.log('\ntwo guards that read one dimension where their siblings read both')
+
+/**
+ * The mirror amount guard was the only payload invariant in `_validate` reading
+ * `verdict` alone. The two-dimension model exists so the payment dimension can
+ * travel under a documentary headline, so that omission left the whole shape
+ * reachable: `evidence: Intact` with `payment: NoValue` and a settled amount.
+ */
+await check('a rung saying nothing settled cannot carry an amount, from either dimension', async () => {
+  const { chain, addr } = await fresh()
+  // NotFound and ForeignChain are the two reachable here: they are the payment
+  // states that do NOT assert the transaction exists, so nothing else refuses
+  // them first. (NoValue does assert it, and MissingPaymentTx catches a missing
+  // hash before this guard is reached — which is luck, not this guard working,
+  // so it is covered below with a hash supplied.)
+  for (const [p, label] of [[P.NotFound, 'NotFound'], [P.ForeignChain, 'ForeignChain']]) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: V.EvidenceIntact, evidence: E.Intact, evidenceHash: EH1,
+      payment: p, amount: 1_000_000n, paymentToken: TOKEN, amountDecimals: 6,
+    })])
+    assert.equal(r.selector, ERRORS.IncoherentAmount, `payment: ${label} must be guarded too`)
+  }
+  // NoValue with a transaction named: now only the amount is incoherent.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: V.EvidenceIntact, evidence: E.Intact, evidenceHash: EH1,
+      payment: P.NoValue, paymentTx: TX1, amount: 1_000_000n, paymentToken: TOKEN, amountDecimals: 6,
+    })])).selector,
+    ERRORS.IncoherentAmount,
+    'a transaction that moved nothing cannot carry a settled sum',
+  )
+  // The headline form was already caught, and still is.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: V.PaymentNoValue, evidence: E.Unknown, payment: P.NoValue,
+      paymentTx: TX1, amount: 1_000_000n, paymentToken: TOKEN,
+    })])).selector,
+    ERRORS.IncoherentAmount,
+  )
+  // And the honest shape still passes: a real amount under a rung that settled.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: V.PaymentVerified, evidence: E.Unknown, payment: P.Verified,
+      paymentTx: TX1, amount: 1_000_000n, paymentToken: TOKEN, amountDecimals: 6,
+    })])).reverted, false,
+    'the guard must not refuse a settled payment that really carries a sum',
+  )
+})
+
+/**
+ * `Unhashed` means the file resolved and CONTRADICTS its attested hash. With no
+ * hash stored there is nothing it can have contradicted — that state is
+ * `Unbound`. v4 guarded only `Intact`, so the ledger accepted an accusation
+ * whose subject was not written down, byte-identical in its hash field to the
+ * benign rung meaning no hash was ever attested.
+ */
+await check('a rung that contradicts an attested hash must name the hash', async () => {
+  const { chain, addr } = await fresh()
+  for (const [v, e] of [[V.EvidenceUnhashed, E.Unhashed], [V.EvidenceIntact, E.Intact]]) {
+    const r = await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: v, evidence: e, evidenceHash: ZERO32,
+    })])
+    assert.equal(r.selector, ERRORS.MissingEvidenceHash, 'a hash-relative rung needs a hash')
+  }
+  // Unbound is the rung for "no hash was attested", and it is still accepted.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: V.EvidenceUnbound, evidence: E.Unbound, evidenceHash: ZERO32,
+    })])).reverted, false,
+    'Unbound is exactly the state a zero hash describes',
+  )
+  // And Unhashed with a real hash is the honest accusation, still allowed.
+  assert.equal(
+    (await chain.call(ATTESTER, addr, 'attest', [claim({
+      verdict: V.EvidenceUnhashed, evidence: E.Unhashed, evidenceHash: EH1,
+    })])).reverted, false,
+  )
 })
 
 console.log(`\n${passed} passed\n`)

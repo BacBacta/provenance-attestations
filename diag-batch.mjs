@@ -1,7 +1,7 @@
 import { createPublicClient, http } from 'viem'
 import { celo } from 'viem/chains'
 import { readFileSync } from 'node:fs'
-import { parseClaimsCsv, indexCache, buildAttestations, chunk } from './script/backfill-lib.mjs'
+import { parseClaimsCsvStrict, indexCache, buildAttestations, chunk, toClaimStruct } from './script/backfill-lib.mjs'
 
 const dep = JSON.parse(readFileSync('deployments/celo.json', 'utf8'))
 const abi = JSON.parse(readFileSync('out/ProvenanceAttestations.abi.json', 'utf8'))
@@ -12,9 +12,22 @@ console.log('attester() =', await pub.readContract({ address: dep.address, abi, 
 console.log('owner()    =', await pub.readContract({ address: dep.address, abi, functionName: 'owner' }))
 console.log('sender     =', dep.attester)
 
-const claims = parseClaimsCsv(readFileSync('../celo-agent-feedback-audit/out/evidence.csv', 'utf8'))
-const cache = indexCache(readFileSync('../celo-agent-feedback-audit/data-bs/feedback-58396729.jsonl', 'utf8').split('\n').filter(Boolean))
-const { rows } = buildAttestations(claims, cache)
+const CSV = process.env.CLAIMS_CSV ?? '../celo-agent-feedback-audit/out/evidence.csv'
+const CACHE = process.env.FEEDBACK_CACHE ?? '../celo-agent-feedback-audit/data-bs/feedback-58396729.jsonl'
+
+const parsed = parseClaimsCsvStrict(readFileSync(CSV, 'utf8'))
+const cache = parsed.header.includes('feedbackIndex')
+  ? { map: new Map(), collisions: [] }
+  : indexCache(readFileSync(CACHE, 'utf8').split('\n').filter(Boolean))
+const { rows, missing, rejected, duplicateTxs, cacheCollisions } = buildAttestations(parsed.rows, cache)
+
+console.log('lignes    =', parsed.rows.length, '| jointes:', rows.length)
+for (const [label, list] of [['malformées', parsed.malformed], ['rejetées', rejected], ['non jointes', missing], ['collisions de clé', cacheCollisions]]) {
+  if (list.length) console.log(`  ${label}: ${list.length}`)
+}
+if (duplicateTxs.length) console.log(`  transactions réutilisées: ${duplicateTxs.length}`)
+if (!rows.length) { console.log('\nRien à simuler.'); process.exit(1) }
+
 const part = chunk(rows, 100)[0]
 console.log('lot 1     =', part.length, 'lignes, verdicts min/max:', Math.min(...part.map(r=>r.verdict)), '/', Math.max(...part.map(r=>r.verdict)))
 
@@ -24,10 +37,7 @@ try {
     address: dep.address,
     abi,
     functionName: 'attestBatch',
-    args: [
-      part.map(r=>r.agentId), part.map(r=>r.clientAddress), part.map(r=>r.feedbackIndex),
-      part.map(r=>r.verdict), part.map(r=>r.paymentTx), part.map(r=>r.evidenceHash),
-    ],
+    args: [part.map(toClaimStruct)],
   })
   const gas = await pub.estimateContractGas({ account: dep.attester, address: dep.address, abi, functionName: 'attestBatch', args: request.args })
   console.log('\nSIMULATION OK — gas estimé:', gas.toString())

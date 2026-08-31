@@ -1,10 +1,19 @@
 {
   "contract": "ProvenanceAttestations",
-  "address": "0x3ed53c9bf7f7b5026eae83e4d62abdbd748a01ab",
-  "deployer": "0xC2Dc6B2853a8deAE5C0A6432B77F226d67B2972A",
+  "version": "5.0.0",
+  "address": "0x86931Ae74F5cE9AA8bf818808e47102516CE78a7",
+  "deployer": "0x6141C7377dfEF6ac8FD2156f5D9fbFb4851Ac4ef",
+  "owner": "0x6141C7377dfEF6ac8FD2156f5D9fbFb4851Ac4ef",
   "attester": "0xC2Dc6B2853a8deAE5C0A6432B77F226d67B2972A",
-  "txHash": "0x424bf1e687a94b6f44c6d582fb2e71252093fb73b25fe4f69f8cc4ef6d0952ea",
-  "block": "76036852",
+  "constructorAttester": "0xC2Dc6B2853a8deAE5C0A6432B77F226d67B2972A",
+  "txHash": "0xdbfe5dbe52bb442a5bde9d1060aaa560ecb47a3347befb201915245e90b6c7cc",
+  "block": "76234488",
   "chainId": 42220,
-  "deployedAt": "2026-08-28T17:20:10.029Z"
+  "deployedAt": "2026-08-31T00:14:08.994Z",
+  "gasUsed": "2988830",
+  "gasPriceWei": "202500000000",
+  "costCelo": "0.605238075",
+  "bytecodeMatchesBuild": true,
+  "note": "Every field read back from chain state and cross-checked: VERSION 5.0.0, pendingOwner zero, totalAttestations and sweepCount both zero, and the deployed bytecode identical to out/ProvenanceAttestations.deployed.bin byte for byte, metadata tail included. Owner is a cold key whose only power is rotating the attester; the attester signs verdicts and holds nothing else. Supersedes v4, whose coverage frontier could be withdrawn exactly once and afterwards reported blocks no standing claim covered while denying blocks a standing claim did; v4 was never written to.",
+  "supersedes": "0x050394eF9941D30f4a2D5989Ddc158e717798e17"
 }

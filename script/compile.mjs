@@ -7,7 +7,9 @@
 import solc from 'solc'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 
-const SOURCE = 'contracts/ProvenanceAttestations.sol'
+// The live v2 deployment's frozen source can be rebuilt for explorer
+// verification: CONTRACT_SOURCE=contracts/deployed/ProvenanceAttestationsV2.sol
+const SOURCE = process.env.CONTRACT_SOURCE ?? 'contracts/ProvenanceAttestations.sol'
 
 const input = {
   language: 'Solidity',
